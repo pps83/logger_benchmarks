@@ -8,10 +8,20 @@
 #include "quill/sinks/FileSink.h"
 #include "quill/std/Vector.h"
 
+#include <stdio.h>
 #include <string>
+
+#ifdef _WIN32
+  #include <psapi.h>
+  #pragma comment(lib, "psapi.lib")
+#endif
 
 using frontend_t = quill::FrontendImpl<CustomFrontendOptions>;
 using logger_t = quill::LoggerImpl<CustomFrontendOptions>;
+
+#ifdef BENCH_MORPH_HOOKS
+static void morph_poll_begin() {}
+#endif
 
 void quill_benchmark(std::vector<int32_t> thread_count_array, size_t num_iterations_per_thread)
 {
@@ -19,12 +29,22 @@ void quill_benchmark(std::vector<int32_t> thread_count_array, size_t num_iterati
 
   // Setup
   quill::BackendOptions backend_options;
-  backend_options.cpu_affinity = {5};
+  backend_options.cpu_affinity = {BENCH_BACKEND_CPU};
+#ifndef BENCH_QUILL_BACKEND_SLEEPS
   backend_options.sleep_duration = std::chrono::nanoseconds{0};
+#endif
+  // bte's logger options, one step at a time (our fork only)
+#ifdef BENCH_MORPH_RAW_TSC
+  backend_options.raw_rdtsc_timestamps = true;
+#endif
+#ifdef BENCH_MORPH_HOOKS
+  backend_options.check_printable_char = {};
+  backend_options.backend_worker_on_poll_begin = morph_poll_begin;
+#endif
   quill::Backend::start(backend_options);
 
   // wait for the backend thread to start
-  std::this_thread::sleep_for(std::chrono::seconds(1));
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
   // Frontend
   auto file_sink = frontend_t::create_or_get_sink<quill::FileSink>(
@@ -80,8 +100,17 @@ void quill_benchmark(std::vector<int32_t> thread_count_array, size_t num_iterati
 
   for (auto thread_count : thread_count_array)
   {
+#ifdef _WIN32
+    PROCESS_MEMORY_COUNTERS before{sizeof(before)};
+    GetProcessMemoryInfo(GetCurrentProcess(), &before, sizeof(before));
+#endif
     run_benchmark(benchmark_name.c_str(), thread_count, num_iterations_per_thread,
                   MESSAGES_PER_ITERATION, on_start, log_func, on_exit);
+#ifdef _WIN32
+    PROCESS_MEMORY_COUNTERS after{sizeof(after)};
+    GetProcessMemoryInfo(GetCurrentProcess(), &after, sizeof(after));
+    printf("page faults during the run: %lu\n", after.PageFaultCount - before.PageFaultCount);
+#endif
   }
 }
 

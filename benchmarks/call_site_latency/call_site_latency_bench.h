@@ -7,14 +7,28 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
+#include <immintrin.h>
 #include <iostream>
 #include <numeric>
 #include <random>
-#include <sched.h>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
+
+#ifdef _WIN32
+  #ifndef NOMINMAX
+    #define NOMINMAX
+  #endif
+  #include <windows.h>
+  #include <psapi.h>
+  #pragma comment(lib, "psapi.lib")
+#else
+  #include <sched.h>
+#endif
 
 // Instead of sleep
 inline void wait([[maybe_unused]] std::chrono::nanoseconds min,
@@ -31,10 +45,53 @@ inline void wait([[maybe_unused]] std::chrono::nanoseconds min,
   auto const start_time = std::chrono::steady_clock::now();
   auto const end_time = start_time + std::chrono::nanoseconds{dis(gen)};
   std::chrono::nanoseconds time_now;
+  #ifdef BENCH_WARM_VECTOR
+  // A 256-bit op each turn keeps the core's upper vector lanes powered, which power down when unused for a while
+  __m256i warm = _mm256_setzero_si256();
+  #endif
+  #ifdef BENCH_WAIT_GAPS
+  // Stalls of the waiting thread over 10000 ticks, counted and summed, printed when the thread ends
+  struct WaitGaps
+  {
+    uint64_t count = 0;
+    uint64_t ticks = 0;
+    uint64_t waited = 0;
+    ~WaitGaps()
+    {
+      if (waited != 0)
+      {
+        std::printf("wait gaps over 10000 ticks: %llu, %llu ticks of %llu waited\n", static_cast<unsigned long long>(count),
+                    static_cast<unsigned long long>(ticks), static_cast<unsigned long long>(waited));
+      }
+    }
+  };
+  thread_local WaitGaps gaps;
+  uint64_t previous_tick = __rdtsc();
+  uint64_t const first_tick = previous_tick;
+  #endif
   do
   {
     time_now = std::chrono::steady_clock::now().time_since_epoch();
+  #ifdef BENCH_WAIT_GAPS
+    uint64_t const tick = __rdtsc();
+    if (tick - previous_tick > 10000)
+    {
+      ++gaps.count;
+      gaps.ticks += tick - previous_tick;
+    }
+    previous_tick = tick;
+  #endif
+  #ifdef BENCH_WARM_VECTOR
+    warm = _mm256_add_epi32(warm, _mm256_set1_epi32(static_cast<int>(time_now.count())));
+  #endif
   } while (time_now < end_time.time_since_epoch());
+  #ifdef BENCH_WAIT_GAPS
+  gaps.waited += previous_tick - first_tick;
+  #endif
+  #ifdef BENCH_WARM_VECTOR
+  static volatile int warm_sink;
+  warm_sink = _mm256_extract_epi32(warm, 0);
+  #endif
 #else
   // when in perf use sleep as the other variables add noise
   std::this_thread::sleep_for(max);
@@ -43,6 +100,12 @@ inline void wait([[maybe_unused]] std::chrono::nanoseconds min,
 
 inline void set_thread_affinity(size_t cpu_num)
 {
+#ifdef _WIN32
+  if (SetThreadAffinityMask(GetCurrentThread(), DWORD_PTR{1} << cpu_num) == 0)
+  {
+    throw std::system_error(static_cast<int>(GetLastError()), std::system_category());
+  }
+#else
   // Set this thread affinity
   cpu_set_t cpuset;
   CPU_ZERO(&cpuset);
@@ -54,6 +117,7 @@ inline void set_thread_affinity(size_t cpu_num)
   {
     throw std::system_error(errno, std::system_category());
   }
+#endif
 }
 
 inline size_t messages_for_thread(size_t messages_per_iteration, size_t thread_count, size_t thread_num) noexcept
@@ -90,7 +154,11 @@ inline void run_log_benchmark(size_t num_iterations,
                               double ns_rdtsc_tick)
 {
   // running thread affinity
+#ifdef BENCH_PRODUCER_CPU_SHIFT
+  set_thread_affinity(current_thread_num + BENCH_PRODUCER_CPU_SHIFT);
+#else
   set_thread_affinity(current_thread_num);
+#endif
 
   //  sched_param param{};
   //  param.sched_priority = 99;
@@ -140,12 +208,48 @@ inline void run_log_benchmark(size_t num_iterations,
     }
   #endif
 
+#ifdef BENCH_PER_MESSAGE
+    // Each call timed alone, in ticks, a line per batch in the file BENCH_DUMP_MESSAGES names
+    thread_local FILE* message_dump = std::fopen(std::getenv("BENCH_DUMP_MESSAGES"), "a");
+    uint64_t ticks[64];
+  #ifdef _WIN32
+    // The process's page faults during the batch end its line
+    PROCESS_MEMORY_COUNTERS faults_before{sizeof(faults_before)};
+    GetProcessMemoryInfo(GetCurrentProcess(), &faults_before, sizeof(faults_before));
+    ULONG64 cycles_before = 0;
+    QueryThreadCycleTime(GetCurrentThread(), &cycles_before);
+  #endif
+    auto const start = serialized_rdtsc();
+    for (size_t j = 0; j < messages_per_iteration; ++j)
+    {
+      auto const t0 = serialized_rdtsc();
+      log_func(i, j, v);
+      ticks[j] = serialized_rdtsc() - t0;
+    }
+    auto const end = serialized_rdtsc();
+    for (size_t j = 0; j < messages_per_iteration; ++j)
+    {
+      std::fprintf(message_dump, "%llu ", static_cast<unsigned long long>(ticks[j]));
+    }
+  #ifdef _WIN32
+    // Then the cycles charged to the thread over the batch, its calls' ticks and its two timestamps included
+    ULONG64 cycles_after = 0;
+    QueryThreadCycleTime(GetCurrentThread(), &cycles_after);
+    PROCESS_MEMORY_COUNTERS faults_after{sizeof(faults_after)};
+    GetProcessMemoryInfo(GetCurrentProcess(), &faults_after, sizeof(faults_after));
+    std::fprintf(message_dump, "%lu %llu %llu %llu", faults_after.PageFaultCount - faults_before.PageFaultCount,
+                 static_cast<unsigned long long>(cycles_after - cycles_before),
+                 static_cast<unsigned long long>(end - start), static_cast<unsigned long long>(start));
+  #endif
+    std::fprintf(message_dump, "\n");
+#else
     auto const start = serialized_rdtsc();
     for (size_t j = 0; j < messages_per_iteration; ++j)
     {
       log_func(i, j, v);
     }
     auto const end = serialized_rdtsc();
+#endif
 
     uint64_t const latency{static_cast<uint64_t>(
       (static_cast<double>(end - start) / static_cast<double>(messages_per_iteration)) * ns_rdtsc_tick)};
@@ -266,6 +370,24 @@ inline void run_benchmark(char const* benchmark_name,
   }
 
 #ifdef BENCH_WITHOUT_PERF
+  // BENCH_DUMP names a file that gets every batch's latency in order, a line per thread, to see when the slow ones come
+  if (char const* dump_path = std::getenv("BENCH_DUMP"))
+  {
+    if (FILE* dump = std::fopen(dump_path, "a"))
+    {
+      std::fprintf(dump, "%s threads %d\n", benchmark_name, thread_count);
+      for (auto const& elem : latencies)
+      {
+        for (uint64_t latency : elem)
+        {
+          std::fprintf(dump, "%llu ", static_cast<unsigned long long>(latency));
+        }
+        std::fprintf(dump, "\n");
+      }
+      std::fclose(dump);
+    }
+  }
+
   // All threads have finished we can read all latencies
   std::vector<uint64_t> latencies_combined;
   latencies_combined.reserve(num_iterations * thread_count);

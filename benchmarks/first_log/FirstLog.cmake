@@ -1,0 +1,62 @@
+# Each thread's first LOG, a process per measurement (run_first_log.py runs them): quill, fmtlog and, with BTE_DIR
+# set, backtest-engine's LOG and quill built against its fork
+set(LB_FIRST_LOG ${CMAKE_CURRENT_LIST_DIR})
+
+add_executable(benchmark_quill_first_log ${LB_FIRST_LOG}/benchmark_quill_first_log.cpp)
+target_link_libraries(benchmark_quill_first_log PRIVATE quill)
+
+add_executable(benchmark_fmtlog_first_log ${LB_FIRST_LOG}/benchmark_fmtlog_first_log.cpp)
+target_link_libraries(benchmark_fmtlog_first_log PRIVATE fmtlog Threads::Threads)
+
+if (BTE_DIR)
+    if (MSVC)
+        set(BTE_FIRST_LOG_COMMON_LIB ${BTE_BUILD_DIR}/common.lib)
+    else ()
+        set(BTE_FIRST_LOG_COMMON_LIB ${BTE_BUILD_DIR}/libcommon.a)
+    endif ()
+
+    add_executable(benchmark_bte_first_log ${LB_FIRST_LOG}/benchmark_bte_first_log.cpp)
+    target_compile_features(benchmark_bte_first_log PRIVATE cxx_std_23)
+    if (MSVC)
+        target_compile_options(benchmark_bte_first_log PRIVATE /Zc:preprocessor) # LOG's argument counting needs it
+    endif ()
+    target_include_directories(benchmark_bte_first_log PRIVATE ${BTE_DIR}/src)
+    target_link_libraries(benchmark_bte_first_log PRIVATE ${BTE_FIRST_LOG_COMMON_LIB} Threads::Threads ${CMAKE_DL_LIBS})
+
+    add_executable(llog_after_end ${LB_FIRST_LOG}/llog_after_end.cpp)
+    target_compile_features(llog_after_end PRIVATE cxx_std_23)
+    if (MSVC)
+        target_compile_options(llog_after_end PRIVATE /Zc:preprocessor /Zi)
+        target_link_options(llog_after_end PRIVATE /DEBUG)
+    endif ()
+    target_include_directories(llog_after_end PRIVATE ${BTE_DIR}/src)
+    target_link_libraries(llog_after_end PRIVATE ${BTE_FIRST_LOG_COMMON_LIB} Threads::Threads ${CMAKE_DL_LIBS})
+
+    add_executable(llog_only ${LB_FIRST_LOG}/llog_only.cpp)
+    target_compile_features(llog_only PRIVATE cxx_std_23)
+    if (MSVC)
+        target_compile_options(llog_only PRIVATE /Zc:preprocessor)
+    endif ()
+    target_include_directories(llog_only PRIVATE ${BTE_DIR}/src)
+    target_link_libraries(llog_only PRIVATE ${BTE_FIRST_LOG_COMMON_LIB} Threads::Threads ${CMAKE_DL_LIBS})
+
+    add_executable(benchmark_bte_log_cost ${LB_FIRST_LOG}/benchmark_bte_log_cost.cpp)
+    target_compile_features(benchmark_bte_log_cost PRIVATE cxx_std_23)
+    if (MSVC)
+        target_compile_options(benchmark_bte_log_cost PRIVATE /Zc:preprocessor)
+    endif ()
+    target_include_directories(benchmark_bte_log_cost PRIVATE ${BTE_DIR}/src)
+    target_link_libraries(benchmark_bte_log_cost PRIVATE ${BTE_FIRST_LOG_COMMON_LIB} Threads::Threads ${CMAKE_DL_LIBS})
+
+    add_executable(logger_rate ${LB_FIRST_LOG}/logger_rate.cpp)
+    target_compile_features(logger_rate PRIVATE cxx_std_23)
+    if (MSVC)
+        target_compile_options(logger_rate PRIVATE /Zc:preprocessor)
+    endif ()
+    target_include_directories(logger_rate PRIVATE ${BTE_DIR}/src)
+    target_link_libraries(logger_rate PRIVATE ${BTE_FIRST_LOG_COMMON_LIB} Threads::Threads ${CMAKE_DL_LIBS})
+
+    add_executable(benchmark_quill_fork_first_log ${LB_FIRST_LOG}/benchmark_quill_first_log.cpp)
+    target_include_directories(benchmark_quill_fork_first_log PRIVATE ${BTE_DIR}/ext/quill/include)
+    target_link_libraries(benchmark_quill_fork_first_log PRIVATE Threads::Threads)
+endif ()

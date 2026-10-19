@@ -20,7 +20,7 @@ void fmtlog_benchmark(std::vector<int32_t> thread_count_array, size_t num_iterat
     [&done]()
     {
       // pin to cpu backend logging thread.
-      set_thread_affinity(5);
+      set_thread_affinity(BENCH_BACKEND_CPU);
 
       do
       {
@@ -31,7 +31,7 @@ void fmtlog_benchmark(std::vector<int32_t> thread_count_array, size_t num_iterat
     });
 
   // wait for the backend thread to start
-  std::this_thread::sleep_for(std::chrono::seconds(1));
+  std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
 #ifdef BENCH_INT_INT_DOUBLE
   auto log_func = [](uint64_t i, uint64_t j, double d)
@@ -46,8 +46,9 @@ void fmtlog_benchmark(std::vector<int32_t> thread_count_array, size_t num_iterat
 
   auto on_start = []()
   {
+    // Long enough for the busy backend to take it, short enough that the producer's core does not clock down
     FMTLOG(fmtlog::INF, "Warm up");
-    std::this_thread::sleep_for(std::chrono::seconds{1});
+    std::this_thread::sleep_for(std::chrono::milliseconds{10});
   };
 
   auto on_exit = []() { };
