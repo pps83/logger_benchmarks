@@ -1,0 +1,67 @@
+name: bte logger
+
+# backtest-engine's logger (bte/, copied by tools/sync_bte.py): its tests and log_stress on every platform it targets
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  posix:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64-gcc
+            os: ubuntu-24.04
+            cxx: g++-14
+          - name: linux-x64-clang
+            os: ubuntu-24.04
+            cxx: clang++-18
+          - name: linux-arm64-gcc
+            os: ubuntu-24.04-arm
+            cxx: g++-14
+          - name: macos-arm64-clang
+            os: macos-15
+            cxx: clang++
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S bte -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+      - name: Build
+        run: cmake --build build --parallel
+      - name: Logger tests
+        run: ./build/bte_log_tests --gtest_brief=1
+      - name: log_stress
+        run: ./build/log_stress --runs 3
+
+  windows:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64-msvc
+            os: windows-2025
+            platform: x64
+          - name: windows-x86-msvc
+            os: windows-2025
+            platform: Win32
+          - name: windows-arm64-msvc
+            os: windows-11-arm
+            platform: ARM64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S bte -B build -A ${{ matrix.platform }}
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Logger tests
+        run: ./build/Release/bte_log_tests.exe --gtest_brief=1
+      - name: log_stress
+        run: ./build/Release/log_stress.exe --runs 3
