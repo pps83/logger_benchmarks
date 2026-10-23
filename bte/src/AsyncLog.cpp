@@ -7,7 +7,6 @@
 #include "quill/Backend.h"
 #include "quill/Frontend.h"
 #include "quill/GlobalState.h"
-#include "quill/core/Rdtsc.h"
 #include "quill/sinks/Sink.h"
 #include <signal.h>
 #include <stdarg.h>
@@ -1221,11 +1220,6 @@ void logdetail::writeSync(const unsigned char* record)
 void logdetail::submitText(std::string_view text)
 {
     logFields(kTextSite, text);
-}
-
-uint64_t logdetail::quillCounter()
-{
-    return quill::detail::rdtsc();
 }
 
 #ifdef _WIN32

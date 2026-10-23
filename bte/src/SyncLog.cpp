@@ -3,6 +3,7 @@
 #include "sysutil.h"
 #include "date.h"
 #include "UninitializedMemoryHacks.h"
+#include "quill/core/Rdtsc.h"
 #include <errno.h>
 #include <stdio.h>
 #include <string.h>
@@ -591,6 +592,12 @@ void logSync(long long timeTick, std::string_view msg)
     char threadName[kThreadNameWidth + 1];
     readThreadName(threadName);
     writeLogLine(line, ticksToTime(timeTick), logThreadId(), threadName, false);
+}
+
+// Here, not in AsyncLog.cpp: LLOG reads it too, and a program logging only with LLOG links no async logger
+uint64_t logdetail::quillCounter()
+{
+    return quill::detail::rdtsc();
 }
 
 static constinit std::atomic<LlogRecordSink> gLlogSink {nullptr};
