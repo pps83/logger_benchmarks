@@ -40,7 +40,13 @@ bool debuggerPresent()
 #else
 unsigned currentThreadId()
 {
+#ifdef __APPLE__
+    uint64_t id = 0;
+    pthread_threadid_np(nullptr, &id);
+    return static_cast<unsigned>(id);
+#else
     return static_cast<unsigned>(pthread_self());
+#endif
 }
 
 bool debuggerPresent()
