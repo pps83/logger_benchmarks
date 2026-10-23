@@ -1,0 +1,60 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup Label="UserMacros" Condition="'$(PlatformToolset)' == 'Intel C++ Compiler 2024'">
+    <IgnoreX86PreferredToolArchitecture>false</IgnoreX86PreferredToolArchitecture>
+  </PropertyGroup>
+  <PropertyGroup Label="UserMacros">
+    <PlatformToolsetConfiguration>$([System.String]::Copy('$(Platform)-$(PlatformToolset)-$(Configuration)').Replace('Intel C++ Compiler ', 'icx').Replace('Win32', 'x86').Replace('-Debug', '-d').Replace('-Release', '').Replace(' ', '').ToLower())</PlatformToolsetConfiguration>
+  </PropertyGroup>
+  <PropertyGroup>
+    <_PropertySheetDisplayName>Common properties</_PropertySheetDisplayName>
+    <OutDir>$(SolutionDir)build.msvc\$(PlatformToolsetConfiguration)\</OutDir>
+    <IntDir>$(SolutionDir)build.msvc\.obj\$(PlatformToolsetConfiguration)\$(ProjectName)\</IntDir>
+    <LinkIncremental Condition="'$(Configuration)' == 'Debug' And '$(EnableASAN)' != 'true'">true</LinkIncremental>
+    <LinkIncremental Condition="'$(Configuration)' != 'Debug' Or  '$(EnableASAN)' == 'true'">false</LinkIncremental>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <PreprocessorDefinitions Condition="'$(PlatformToolset)' == 'Intel C++ Compiler 2024'">_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(Configuration)' == 'Debug'">_DEBUG;DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions Condition="'$(Configuration)' != 'Debug'">_ITERATOR_DEBUG_LEVEL=0;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <PreprocessorDefinitions>_WIN32_WINNT=0x0A00;WINVER=0x0A00;NTDDI_VERSION=0x0A000000;WIN32;WIN32_LEAN_AND_MEAN=;NOMINMAX=;_CRT_SECURE_NO_WARNINGS=;_SCL_SECURE_NO_WARNINGS=;_SILENCE_CXX17_OLD_ALLOCATOR_MEMBERS_DEPRECATION_WARNING=;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalOptions Condition="!('$(PlatformToolset)'=='ClangCL' Or ($(PlatformToolset.StartsWith('Intel')) And $(PlatformToolset.Contains('C++ Compiler'))))">/d2OptimizeHugeFunctions /bigobj %(AdditionalOptions)</AdditionalOptions>
+      <AdditionalOptions Condition=" ('$(PlatformToolset)'=='ClangCL' Or ($(PlatformToolset.StartsWith('Intel')) And $(PlatformToolset.Contains('C++ Compiler'))))">-Werror=format %(AdditionalOptions)</AdditionalOptions>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <MinimalRebuild>false</MinimalRebuild>
+      <OmitFramePointers>false</OmitFramePointers>
+      <DebugInformationFormat Condition="'$(Configuration)' == 'Debug' And '$(EnableASAN)' != 'true'">EditAndContinue</DebugInformationFormat>
+      <DebugInformationFormat Condition="'$(Configuration)' != 'Debug' Or  '$(EnableASAN)' == 'true'">ProgramDatabase</DebugInformationFormat>
+      <Optimization Condition="'$(Configuration)' == 'Debug'">Disabled</Optimization>
+      <Optimization Condition="'$(Configuration)' != 'Debug'">MaxSpeed</Optimization>
+      <RuntimeLibrary Condition="'$(Configuration)' != 'Debug'">MultiThreaded</RuntimeLibrary>
+      <RuntimeLibrary Condition="'$(Configuration)' == 'Debug'">MultiThreadedDebug</RuntimeLibrary>
+      <RuntimeLibrary Condition="'$(Configuration)' != 'Debug' And $(PlatformToolset.Contains('DPC++ Compiler'))">MultiThreadedDLL</RuntimeLibrary>
+      <RuntimeLibrary Condition="'$(Configuration)' == 'Debug' And $(PlatformToolset.Contains('DPC++ Compiler'))">MultiThreadedDebugDLL</RuntimeLibrary>
+      <UseDynamicDebugging Condition="'$(Configuration)' != 'Debug' And '$(Platform)' == 'x64' And '$(EnableASAN)' != 'true' And ('$(PlatformToolset)'=='v143' Or '$(PlatformToolset)'=='v143')">true</UseDynamicDebugging>
+      <WarningLevel>Level4</WarningLevel>
+      <!-- 4800: conversion to bool, all others are printf-related -->
+      <TreatSpecificWarningsAsErrors>4422;4426;4313;4317;4473;4474;4475;4476;4477;4478;4775;4776;4777;4778;4800</TreatSpecificWarningsAsErrors>
+      <BufferSecurityCheck Condition="'$(Configuration)' != 'Debug'">false</BufferSecurityCheck>
+      <SDLCheck Condition="'$(Configuration)' != 'Debug'">false</SDLCheck>
+      <SDLCheck Condition="'$(Configuration)' == 'Debug'">true</SDLCheck>
+      <ConformanceMode>true</ConformanceMode>
+      <EnableEnhancedInstructionSet>AdvancedVectorExtensions2</EnableEnhancedInstructionSet>
+      <LanguageStandard>stdcpplatest</LanguageStandard>
+      <LanguageStandard_C>stdc17</LanguageStandard_C>
+      <UseStandardPreprocessor>true</UseStandardPreprocessor>
+    </ClCompile>
+    <Link>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+      <GenerateDebugInformation Condition="'$(Configuration)' != 'Debug'">DebugFull</GenerateDebugInformation>
+      <OptimizeReferences>
+      </OptimizeReferences>
+      <EnableCOMDATFolding>
+      </EnableCOMDATFolding>
+      <OptimizeReferences Condition="'$(Configuration)' != 'Debug'">true</OptimizeReferences>
+      <EnableCOMDATFolding Condition="'$(Configuration)' != 'Debug'">true</EnableCOMDATFolding>
+      <SubSystem>Console</SubSystem>
+    </Link>
+  </ItemDefinitionGroup>
+</Project>

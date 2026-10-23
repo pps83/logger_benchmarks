@@ -1,0 +1,13 @@
+# Visual Studio
+*.sln eol=crlf
+*.slnx eol=crlf
+*.csproj eol=crlf
+*.pyproj eol=crlf
+*.vbproj eol=crlf
+*.vcxproj eol=crlf
+*.vcxproj eol=crlf
+*.vcxproj.filters eol=crlf
+*.rc eol=crlf
+*.rc2 eol=crlf
+*.props eol=crlf
+*.natvis eol=crlf

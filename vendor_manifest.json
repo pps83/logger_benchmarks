@@ -68,6 +68,27 @@
       "repo_url": "https://github.com/choll/xtr.git",
       "ref": "6bb69e9ae1d8d6a906aa7b1e6b27a3b354dbae2c",
       "target_dir": "third_party/xtr"
+    },
+    {
+      "name": "quill_bte",
+      "repo_url": "https://github.com/pps83/quill.git",
+      "ref": "770e24cfec4c30ad6e3c2e9da57ca3b32e790a57",
+      "target_dir": "third_party/quill_bte",
+      "skip_update": true
+    },
+    {
+      "name": "int128",
+      "repo_url": "https://github.com/pps83/int128.git",
+      "ref": "b86fd1b372bb5171b37dcdf33ecc3ff8985e0e5f",
+      "target_dir": "third_party/int128",
+      "skip_update": true
+    },
+    {
+      "name": "googletest",
+      "repo_url": "https://github.com/pps83/googletest.git",
+      "ref": "a5fff33f9798ad76cbf9c64a18d5503ef8b16413",
+      "target_dir": "third_party/googletest",
+      "skip_update": true
     }
   ]
 }
