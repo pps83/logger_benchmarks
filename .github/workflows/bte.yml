@@ -27,16 +27,29 @@ jobs:
           - name: macos-arm64-clang
             os: macos-15
             cxx: clang++
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Configure
         run: cmake -S bte -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
       - name: Build
-        run: cmake --build build --parallel
+        run: |
+          set -o pipefail
+          cmake --build build --parallel 2>&1 | tee out.log
       - name: Logger tests
-        run: ./build/bte_log_tests --gtest_brief=1
+        run: |
+          set -o pipefail
+          ./build/bte_log_tests --gtest_brief=1 2>&1 | tee -a out.log
       - name: log_stress
-        run: ./build/log_stress --runs 3
+        run: |
+          set -o pipefail
+          ./build/log_stress --runs 3 2>&1 | tee -a out.log
+      # Annotations can be read without signing in, unlike the log
+      - name: Report
+        if: failure()
+        run: grep -E "error|warning|FAILED|Failure|failed|rerun" out.log | head -40 | sed 's/^/::error::/'
 
   windows:
     name: ${{ matrix.name }}
@@ -55,13 +68,26 @@ jobs:
           - name: windows-arm64-msvc
             os: windows-11-arm
             platform: ARM64
+    defaults:
+      run:
+        shell: bash
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Configure
         run: cmake -S bte -B build -A ${{ matrix.platform }}
       - name: Build
-        run: cmake --build build --config Release --parallel
+        run: |
+          set -o pipefail
+          cmake --build build --config Release --parallel 2>&1 | tee out.log
       - name: Logger tests
-        run: ./build/Release/bte_log_tests.exe --gtest_brief=1
+        run: |
+          set -o pipefail
+          ./build/Release/bte_log_tests.exe --gtest_brief=1 2>&1 | tee -a out.log
       - name: log_stress
-        run: ./build/Release/log_stress.exe --runs 3
+        run: |
+          set -o pipefail
+          ./build/Release/log_stress.exe --runs 3 2>&1 | tee -a out.log
+      # Annotations can be read without signing in, unlike the log
+      - name: Report
+        if: failure()
+        run: grep -E "error|warning|FAILED|Failure|failed|rerun" out.log | head -40 | sed 's/^/::error::/'
