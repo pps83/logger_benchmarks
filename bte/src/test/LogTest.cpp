@@ -517,19 +517,17 @@ static long long utcSeconds(int year, int month, int day, int hour, int minute, 
     return days * 86400LL + hour * 3600LL + minute * 60LL + second;
 }
 
-TEST_F(LogTest, LinesStartWithLocalTime)
+static void logTimedLine()
 {
-    EXPECT_EXIT(
-    {
-        LOG("starts the logger");
-        const long long before = ticksToMs(timeTicks());
-        LOG("timed line");
-        const long long after = ticksToMs(timeTicks());
-        LOG("timed between %lld and %lld ms", before, after);
-        exit(0);
-    },
-    testing::ExitedWithCode(0), "");
-    const std::string text = logged();
+    const long long before = ticksToMs(timeTicks());
+    LOG("timed line");
+    const long long after = ticksToMs(timeTicks());
+    LOG("timed between %lld and %lld ms", before, after);
+}
+
+// The printed time of "timed line" lies between the wall clock read before and after it
+static void expectTimedLineOnTheWallClock(const std::string& text)
+{
     const size_t timed = text.find("timed line");
     const size_t between = text.find("timed between ");
     ASSERT_NE(timed, std::string::npos);
@@ -549,6 +547,32 @@ TEST_F(LogTest, LinesStartWithLocalTime)
     const long long printed = (printedSeconds - localOffset) * 1000 + ms;
     EXPECT_GE(printed, before - 2);
     EXPECT_LE(printed, after + 2);
+}
+
+TEST_F(LogTest, LinesStartWithLocalTime)
+{
+    EXPECT_EXIT(
+    {
+        LOG("starts the logger");
+        logTimedLine();
+        exit(0);
+    },
+    testing::ExitedWithCode(0), "");
+    expectTimedLineOnTheWallClock(logged());
+}
+
+// A counter rate converted wrong drifts with the time since the clock was set, so a line 300 ms in shows it
+TEST_F(LogTest, ALineLoggedLaterIsStillOnTheWallClock)
+{
+    EXPECT_EXIT(
+    {
+        LOG("starts the logger");
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        logTimedLine();
+        exit(0);
+    },
+    testing::ExitedWithCode(0), "");
+    expectTimedLineOnTheWallClock(logged());
 }
 
 static void logFromNamedThread()
