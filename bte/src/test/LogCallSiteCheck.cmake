@@ -1,29 +1,40 @@
 # cmake -DTOOL=<objdump or llvm-objdump> -DOBJECT=<LogCallSites object> [-DEXTRA_ALLOWED=<symbol>] -P <this file>
 # Fails when a logCallSite function reads the counter other than once inline, or calls or jumps anywhere but LOG's
 # cold paths, logSlow and commitAfterRepeats
-execute_process(COMMAND "${TOOL}" -d -r --no-show-raw-insn "${OBJECT}" OUTPUT_VARIABLE out RESULT_VARIABLE rc)
-if (NOT rc EQUAL 0)
-  message(FATAL_ERROR "LogCallSiteCheck: ${TOOL} failed on ${OBJECT}")
-endif()
+cmake_minimum_required(VERSION 3.28) # without it, -P runs the script with CMake's old policies and no IN_LIST
 
-# Brackets and semicolons would break CMake's list of lines
-string(REPLACE ";" "," out "${out}")
-string(REPLACE "[" "(" out "${out}")
-string(REPLACE "]" ")" out "${out}")
-string(REPLACE "\n" ";" lines "${out}")
+macro(objdumpLines var)
+  execute_process(COMMAND "${TOOL}" ${ARGN} "${OBJECT}" OUTPUT_VARIABLE out RESULT_VARIABLE rc)
+  if (NOT rc EQUAL 0)
+    message(FATAL_ERROR "LogCallSiteCheck: ${TOOL} failed on ${OBJECT}")
+  endif()
+  # Brackets and semicolons would break CMake's list of lines
+  string(REPLACE ";" "," out "${out}")
+  string(REPLACE "[" "(" out "${out}")
+  string(REPLACE "]" ")" out "${out}")
+  string(REPLACE "\n" ";" ${var} "${out}")
+endmacro()
+
+# A Mach-O disassembly names the function at the start of a section by its local label, <ltmp0>
+objdumpLines(symbols -t)
+foreach (line IN LISTS symbols)
+  if (line MATCHES "^([0-9a-f]+) .*[ \t](_?logCallSite(Literal|Numbers))$")
+    set("symbolAt_${CMAKE_MATCH_1}" "${CMAKE_MATCH_2}")
+  endif()
+endforeach()
+objdumpLines(lines -d -r --no-show-raw-insn)
 
 set(allowed "logSlow|commitAfterRepeats")
 if (EXTRA_ALLOWED)
   string(APPEND allowed "|${EXTRA_ALLOWED}")
 endif()
 
-# A call or jump no relocation followed targets its operand's symbol; a jump inside the function is fine
+# A call or jump no relocation followed targets its operand's symbol: the function itself, its cold part or a local
+# label (MSVC's $LN11, Mach-O's ltmp0) is fine
 macro(checkPending)
   if (NOT pendingOp STREQUAL "")
-    if (pendingOp MATCHES "^(call|callq|bl)$" OR NOT pendingTarget MATCHES "${base}|^\\$")
-      if (NOT pendingTarget MATCHES "${allowed}")
-        list(APPEND failures "${function}: ${pendingOp} to ${pendingTarget}")
-      endif()
+    if (NOT pendingTarget MATCHES "${base}|^\\$|^ltmp[0-9]+$|${allowed}")
+      list(APPEND failures "${function}: ${pendingOp} to ${pendingTarget}")
     endif()
     set(pendingOp "")
   endif()
@@ -36,10 +47,15 @@ set(pendingOp "")
 foreach (line IN LISTS lines)
   # "0000000000000000 <logCallSiteNumbers>:", or <_logCallSiteNumbers> and <logCallSiteNumbers.cold>; MSVC's labels
   # inside a function, <$LN11>, belong to it
-  if (line MATCHES "^[0-9a-f]+ <([^$>][^>]*)>:$")
-    set(name "${CMAKE_MATCH_1}")
+  if (line MATCHES "^([0-9a-f]+) <([^$>][^>]*)>:$")
+    set(address "${CMAKE_MATCH_1}")
+    set(name "${CMAKE_MATCH_2}")
+    if (name MATCHES "^ltmp[0-9]+$" AND DEFINED "symbolAt_${address}")
+      set(name "${symbolAt_${address}}")
+    endif()
     checkPending()
     set(function "")
+    set(tlvLoaded FALSE)
     if (name MATCHES "logCallSite(Literal|Numbers)")
       set(function "${name}")
       set(base "logCallSite${CMAKE_MATCH_1}")
@@ -55,9 +71,12 @@ foreach (line IN LISTS lines)
   endif()
 
   # The relocation written after a call or a jump names its real target
-  if (line MATCHES "^[ \t]+[0-9a-f]+:[ \t]+[A-Z][A-Z0-9_]*[ \t]+([^ \t]+)$")
-    set(target "${CMAKE_MATCH_1}")
-    if (NOT pendingOp STREQUAL "" AND NOT target MATCHES "${allowed}")
+  if (line MATCHES "^[ \t]+[0-9a-f]+:[ \t]+([A-Z][A-Z0-9_]*)[ \t]+([^ \t]+)$")
+    set(target "${CMAKE_MATCH_2}")
+    if (CMAKE_MATCH_1 MATCHES "TLVP_LOAD_PAGEOFF12")
+      set(tlvLoaded TRUE)
+    endif()
+    if (NOT pendingOp STREQUAL "" AND NOT target MATCHES "${base}|${allowed}")
       list(APPEND failures "${function}: ${pendingOp} to ${target}")
     endif()
     set(pendingOp "")
@@ -72,6 +91,9 @@ foreach (line IN LISTS lines)
   checkPending()
   if (op STREQUAL "rdtsc" OR (op STREQUAL "mrs" AND args MATCHES "(cntvct|CNTVCT)_(el0|EL0)"))
     math(EXPR "reads_${base}" "${reads_${base}} + 1")
+  elseif (op STREQUAL "blr" AND tlvLoaded)
+    # macOS reads a thread_local through the getter its descriptor holds
+    set(tlvLoaded FALSE)
   elseif (op MATCHES "^(blr|br)$" OR (op MATCHES "^(call|callq|jmp|jmpq)$" AND args MATCHES "^\\*"))
     list(APPEND failures "${function}: indirect ${op} ${args}")
   elseif (op MATCHES "^(call|callq|jmp|jmpq|bl|b)$" AND args MATCHES "^(0x)?[0-9a-f]+ <([^>+]+)")
