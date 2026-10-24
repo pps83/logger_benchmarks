@@ -92,7 +92,7 @@ target_link_libraries(boost_log INTERFACE
     ${CMAKE_CURRENT_SOURCE_DIR}/lib/libboost_regex.a
     ${CMAKE_CURRENT_SOURCE_DIR}/lib/libboost_atomic.a
     Threads::Threads
-    rt
+    $<$<PLATFORM_ID:Linux>:rt>
 )
 '''
 
