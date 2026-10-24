@@ -45,7 +45,8 @@ jobs:
       # Annotations can be read without signing in, unlike the log
       - name: Report
         if: failure()
-        run: grep -E "error:|Error [0-9]|FAILED|Abort|abort" out.log | head -40 | sed 's/^/::error::/'
+        run: |
+          grep -E "error:|Error [0-9]|FAILED|Abort|abort|Undefined symbols|referenced from|ld: " out.log | head -40 | sed 's/^/::error::/'
 
   windows:
     name: ${{ matrix.name }}
