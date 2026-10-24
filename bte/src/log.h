@@ -739,8 +739,8 @@ FORCEINLINE void prefetchForWrite(const unsigned char* at)
 {
 #if defined(_MSC_VER) && !defined(__clang__) && (defined(_M_X64) || defined(_M_IX86))
     _m_prefetchw(at);
-#elif defined(_MSC_VER) && !defined(__clang__)
-    (void)at;
+#elif defined(_MSC_VER) && !defined(__clang__) && defined(_M_ARM64)
+    __prefetch2(at, 0x10); // 0x10: prefetch for writing, as __builtin_prefetch(at, 1)
 #else
     __builtin_prefetch(at, 1);
 #endif

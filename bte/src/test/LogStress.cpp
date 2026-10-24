@@ -1081,19 +1081,26 @@ std::string withoutSanitizerNotes(const std::string& errors)
 }
 
 // A line of ASan's report of a SEGV: the log's handler hands a fault on to the handler installed before it, ASan's
-bool asanSegvLine(std::string_view line)
+// ASan's report of the planned fault, or UBSan's when it runs without ASan: the same lines under another name
+bool sanitizerSegvLine(std::string_view line)
 {
     if (line.find("ERROR: ") != std::string_view::npos)
-        return line.find("ERROR: AddressSanitizer: SEGV on unknown address") != std::string_view::npos;
+        return line.find("Sanitizer: SEGV on unknown address") != std::string_view::npos;
     // A fault on another thread than main adds where that thread was created
     const bool threadCreated = line.starts_with("Thread T") && line.find(" created by T") != std::string_view::npos;
     return line.starts_with("==") || line.starts_with("    #") || line.find(" = 0x") != std::string_view::npos ||
-           line == "AddressSanitizer:DEADLYSIGNAL" || line.starts_with("AddressSanitizer can not provide additional") ||
-           line.starts_with("SUMMARY: AddressSanitizer: SEGV") || threadCreated;
+           line.ends_with("Sanitizer:DEADLYSIGNAL") || line.find("Sanitizer can not provide additional") != line.npos ||
+           (line.starts_with("SUMMARY: ") && line.find("Sanitizer: SEGV") != line.npos) || threadCreated;
 }
 
-// What the planned crash writes itself: the C++ runtime's words on the throw, MSVC Debug's on abort, ASan's report
-bool plannedOutput(Crash crash, std::string_view line)
+// UBSan without ASan has no macro to tell it by, but only it writes this
+bool ubsanReported(const std::string& errors)
+{
+    return errors.find("ERROR: UndefinedBehaviorSanitizer: SEGV") != std::string::npos;
+}
+
+// What the planned crash writes itself: the C++ runtime's words on the throw, MSVC Debug's on abort, sanitizer reports
+bool plannedOutput(Crash crash, std::string_view line, bool sanitized)
 {
     if (line.empty())
         return true;
@@ -1109,7 +1116,7 @@ bool plannedOutput(Crash crash, std::string_view line)
     if (line == (crash == Crash::Fault ? "qemu: uncaught target signal 11 (Segmentation fault) - core dumped"
                                        : "qemu: uncaught target signal 6 (Aborted) - core dumped"))
         return true;
-    return crash == Crash::Fault && HAVE_ASAN && asanSegvLine(line);
+    return crash == Crash::Fault && sanitized && sanitizerSegvLine(line);
 }
 
 // Any other line in a crash run's errors is a failure of its own, as is a planned line written twice: a second crash
@@ -1117,6 +1124,7 @@ std::string unplannedOutput(const std::string& errors, Crash crash)
 {
     std::string unplanned;
     std::vector<std::string_view> planned;
+    const bool sanitized = HAVE_ASAN || ubsanReported(errors);
     for (size_t begin = 0; begin < errors.size();)
     {
         const size_t newline = errors.find('\n', begin);
@@ -1125,7 +1133,7 @@ std::string unplannedOutput(const std::string& errors, Crash crash)
         while (!line.empty() && (line.back() == '\n' || line.back() == '\r'))
             line.remove_suffix(1);
         const bool again = !line.empty() && std::ranges::find(planned, line) != planned.end();
-        if (again || !plannedOutput(crash, line))
+        if (again || !plannedOutput(crash, line, sanitized))
             unplanned.append(errors, begin, end - begin);
         else if (!line.empty())
             planned.push_back(line);
@@ -1146,11 +1154,10 @@ bool plannedEnd(Crash crash, long long code, [[maybe_unused]] const std::string&
     // On x86 an uncaught throw reaches no terminate: with no filter before the log's, SEH ends it with its own code
     return crash == Crash::Throw && code == 0xE06D7363;
 #else
-    // ASan reports the fault the log's handler hands on to it and exits with 1
-    const bool asanReported =
-        HAVE_ASAN && code == 1 && errors.find("ERROR: AddressSanitizer: SEGV") != std::string::npos;
+    // ASan, or UBSan without it, reports the fault the log's handler hands on to it and exits with 1
+    const bool asanReported = HAVE_ASAN && errors.find("ERROR: AddressSanitizer: SEGV") != std::string::npos;
     if (crash == Crash::Fault)
-        return code == kSignaled + SIGSEGV || asanReported;
+        return code == kSignaled + SIGSEGV || (code == 1 && (asanReported || ubsanReported(errors)));
     return code == kSignaled + SIGABRT;
 #endif
 }
