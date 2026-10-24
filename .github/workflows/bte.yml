@@ -68,6 +68,13 @@ jobs:
       - name: Report
         if: failure()
         run: |
+          # A step keeps its first ten annotations, so a block of lines goes into one
+          block() { sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}' | sed "s/^/::error title=$1::/"; echo; }
+          grep -A30 "Checking that LOG call sites" out.log | grep -v " warning: " | block call-site-check || true
+          obj=$(find build -name "LogCallSites.cpp.o" | head -1)
+          if [ -n "$obj" ]; then
+            objdump -d -r --no-show-raw-insn "$obj" | head -400 | block call-site-disassembly || true
+          fi
           grep -E "error|ERROR|WARNING|SUMMARY|FAILED|Failure|failed|rerun|call site|logCallSite" out.log |
             grep -v " warning: " | head -40 | sed 's/^/::error::/'
 
