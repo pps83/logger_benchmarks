@@ -32,6 +32,8 @@ FILES = [
     "src/sysutil.h",
     "src/time.cpp",
     "src/time_tsc.cpp",
+    "src/test/LogCallSiteCheck.cmake",
+    "src/test/LogCallSites.cpp",
     "src/test/LogCrashTest.cpp",
     "src/test/LogEarlyInit.cpp",
     "src/test/LogStress.cpp",

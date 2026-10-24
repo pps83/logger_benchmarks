@@ -42,6 +42,29 @@ add_executable(bte_log_tests
 target_include_directories(bte_log_tests PRIVATE src/test)
 target_link_libraries(bte_log_tests PRIVATE btelog gtest)
 
+# An optimized build fails when a LOG call site makes a call (src/test/LogCallSiteCheck.cmake)
+add_library(log_call_sites OBJECT src/test/LogCallSites.cpp)
+target_link_libraries(log_call_sites PRIVATE btelog)
+target_sources(bte_log_tests PRIVATE $<TARGET_OBJECTS:log_call_sites>)
+if (NOT CMAKE_BUILD_TYPE STREQUAL "Debug" AND NOT CMAKE_CXX_FLAGS MATCHES "sanitize")
+    if (MSVC)
+        # Visual Studio's LLVM tools, beside clang-cl or under VC/Tools for cl
+        get_filename_component(COMPILER_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
+        find_program(LOG_DISASSEMBLER llvm-objdump HINTS "${COMPILER_DIR}"
+                     "${COMPILER_DIR}/../../../../../Llvm/x64/bin" "${COMPILER_DIR}/../../../../../Llvm/ARM64/bin")
+    else()
+        set(LOG_DISASSEMBLER "${CMAKE_OBJDUMP}")
+    endif()
+    if (LOG_DISASSEMBLER)
+        add_custom_command(TARGET bte_log_tests POST_BUILD
+            COMMAND ${CMAKE_COMMAND} "-DTOOL=${LOG_DISASSEMBLER}" "-DOBJECT=$<TARGET_OBJECTS:log_call_sites>"
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/src/test/LogCallSiteCheck.cmake
+            COMMENT "Checking that LOG call sites call nothing on their fast path")
+    else()
+        message(WARNING "No llvm-objdump: the LOG call sites go unchecked")
+    endif()
+endif()
+
 add_executable(log_stress src/test/LogStress.cpp src/random.cpp)
 target_include_directories(log_stress PRIVATE src/test)
 target_link_libraries(log_stress PRIVATE btelog)
