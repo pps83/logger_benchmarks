@@ -10,7 +10,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
-#include <immintrin.h>
+#ifdef BENCH_WARM_VECTOR
+  #include <immintrin.h>
+#endif
 #include <iostream>
 #include <numeric>
 #include <random>
@@ -66,14 +68,14 @@ inline void wait([[maybe_unused]] std::chrono::nanoseconds min,
     }
   };
   thread_local WaitGaps gaps;
-  uint64_t previous_tick = __rdtsc();
+  uint64_t previous_tick = read_ticks();
   uint64_t const first_tick = previous_tick;
   #endif
   do
   {
     time_now = std::chrono::steady_clock::now().time_since_epoch();
   #ifdef BENCH_WAIT_GAPS
-    uint64_t const tick = __rdtsc();
+    uint64_t const tick = read_ticks();
     if (tick - previous_tick > 10000)
     {
       ++gaps.count;
@@ -105,6 +107,8 @@ inline void set_thread_affinity(size_t cpu_num)
   {
     throw std::system_error(static_cast<int>(GetLastError()), std::system_category());
   }
+#elif defined(__APPLE__)
+  (void)cpu_num;
 #else
   // Set this thread affinity
   cpu_set_t cpuset;

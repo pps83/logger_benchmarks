@@ -3,6 +3,10 @@
 #include <sched.h>
 #include <system_error>
 
+#if defined(__APPLE__)
+// macOS has no way to pin a thread to a core
+inline void set_thread_affinity(size_t) {}
+#else
 inline void set_thread_affinity(size_t cpu_num)
 {
   // Set this thread affinity
@@ -17,3 +21,4 @@ inline void set_thread_affinity(size_t cpu_num)
     throw std::system_error(errno, std::system_category());
   }
 }
+#endif

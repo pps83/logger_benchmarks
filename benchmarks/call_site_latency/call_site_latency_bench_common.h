@@ -7,7 +7,7 @@
 
 #if defined(_WIN32)
   #include <intrin.h>
-#else
+#elif defined(__x86_64__) || defined(__i386__)
   #include <x86intrin.h>
 #endif
 #include <algorithm>
@@ -73,7 +73,10 @@ inline bool const finest_timer_resolution_set = (set_finest_timer_resolution(), 
 // #define BENCH_INT_INT_DOUBLE
 // #define BENCH_INT_INT_LARGESTR
 
-#ifndef _WIN32
+#if defined(__APPLE__)
+// macOS has no way to pin a thread to a core
+inline void set_pthread_affinity(pthread_t, int) {}
+#elif !defined(_WIN32)
 inline void set_pthread_affinity(pthread_t thread, int cpu)
 {
   cpu_set_t cpus;
@@ -84,14 +87,51 @@ inline void set_pthread_affinity(pthread_t thread, int cpu)
 }
 #endif
 
-// RDTSC is not a serializing instruction. Fence both sides so the measured
-// logging calls cannot move into or out of the timed region.
+// The counter the measurements read: the TSC on x86, the generic timer (CNTVCT_EL0) on ARM64
+inline uint64_t read_ticks() noexcept
+{
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+  return __rdtsc();
+#elif defined(__aarch64__)
+  uint64_t ticks;
+  __asm__ volatile("mrs %0, cntvct_el0" : "=r"(ticks));
+  return ticks;
+#elif defined(_M_ARM64)
+  return static_cast<uint64_t>(_ReadStatusReg(ARM64_SYSREG(3, 3, 14, 0, 2)));
+#else
+  #error no tick counter for this CPU
+#endif
+}
+
+// Neither counter read serializes: fences on both sides keep the measured logging calls inside the timed region
 inline uint64_t serialized_rdtsc() noexcept
 {
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
   _mm_lfence();
-  uint64_t const timestamp = __rdtsc();
+  uint64_t const timestamp = read_ticks();
   _mm_lfence();
+#elif defined(__aarch64__)
+  __asm__ volatile("isb" ::: "memory");
+  uint64_t const timestamp = read_ticks();
+  __asm__ volatile("isb" ::: "memory");
+#else
+  __isb(_ARM64_BARRIER_SY);
+  uint64_t const timestamp = read_ticks();
+  __isb(_ARM64_BARRIER_SY);
+#endif
   return timestamp;
+}
+
+// The spin-wait hint: PAUSE on x86, YIELD on ARM64
+inline void spin_pause() noexcept
+{
+#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+  _mm_pause();
+#elif defined(__aarch64__)
+  __asm__ volatile("yield");
+#else
+  __yield();
+#endif
 }
 
 /** -------- **/

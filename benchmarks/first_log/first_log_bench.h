@@ -4,7 +4,6 @@
 
 #include <atomic>
 #include <chrono>
-#include <immintrin.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,7 +32,7 @@ inline void log_first_in_burst(FirstLogRun& run, int thread)
   run.ready.fetch_add(1);
   while (!run.go.load(std::memory_order_acquire))
   {
-    _mm_pause();
+    spin_pause();
   }
 
   uint64_t const start = serialized_rdtsc();
@@ -118,7 +117,7 @@ inline int run_first_log(int argc, char* argv[], FirstLogFunc log)
   }
   while (run.ready.load() != thread_count)
   {
-    _mm_pause();
+    spin_pause();
   }
 
   run.signal = serialized_rdtsc();
@@ -128,7 +127,7 @@ inline int run_first_log(int argc, char* argv[], FirstLogFunc log)
     uint64_t const end_at = run.signal + static_cast<uint64_t>(end_delay_us * 1000 / ns_per_tick);
     while (serialized_rdtsc() < end_at)
     {
-      _mm_pause();
+      spin_pause();
     }
     end_process(end);
   }

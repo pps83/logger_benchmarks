@@ -5,8 +5,10 @@ set(LB_FIRST_LOG ${CMAKE_CURRENT_LIST_DIR})
 add_executable(benchmark_quill_first_log ${LB_FIRST_LOG}/benchmark_quill_first_log.cpp)
 target_link_libraries(benchmark_quill_first_log PRIVATE quill)
 
-add_executable(benchmark_fmtlog_first_log ${LB_FIRST_LOG}/benchmark_fmtlog_first_log.cpp)
-target_link_libraries(benchmark_fmtlog_first_log PRIVATE fmtlog Threads::Threads)
+if (TARGET fmtlog)
+    add_executable(benchmark_fmtlog_first_log ${LB_FIRST_LOG}/benchmark_fmtlog_first_log.cpp)
+    target_link_libraries(benchmark_fmtlog_first_log PRIVATE fmtlog Threads::Threads)
+endif ()
 
 if (BTE_DIR)
     if (MSVC)
