@@ -50,6 +50,9 @@ inline bool const finest_timer_resolution_set = (set_finest_timer_resolution(), 
 #endif
 #ifdef BENCH_ONE_THREAD
   #define THREAD_LIST_COUNT std::vector<int32_t>{1}
+#elif defined(BENCH_THREADS)
+  // The producer thread counts to run, such as BENCH_THREADS=1,2,4
+  #define THREAD_LIST_COUNT std::vector<int32_t>{BENCH_THREADS}
 #else
   #define THREAD_LIST_COUNT std::vector<int32_t>{1, 4}
 #endif
