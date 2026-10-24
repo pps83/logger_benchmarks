@@ -1,0 +1,85 @@
+name: benchmarks
+
+# The benchmarks build on x64 and ARM64 (all of them on Linux and macOS, the minimal set on Windows) and quill's
+# call-site benchmark runs, on the runners' 4 cores
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  posix:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64-gcc
+            os: ubuntu-24.04
+            cxx: g++-14
+          - name: linux-arm64-gcc
+            os: ubuntu-24.04-arm
+            cxx: g++-14
+          - name: macos-arm64-clang
+            os: macos-15
+            cxx: clang++
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - name: Configure
+        run: |
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
+            "-DLB_BENCH_DEFINITIONS=BENCH_BACKEND_CPU=1;BENCH_ONE_THREAD"
+      - name: Build
+        run: |
+          set -o pipefail
+          cmake --build build --parallel 2>&1 | tee out.log
+      - name: quill call-site benchmark
+        run: |
+          set -o pipefail
+          ./build/benchmarks/call_site_latency/benchmark_quill_unbounded_call_site_latency_int_int_double 2>&1 | tee -a out.log
+      # Annotations can be read without signing in, unlike the log
+      - name: Report
+        if: failure()
+        run: |
+          grep -E "error:|Error [0-9]|FAILED|Abort|abort|Undefined symbols|referenced from|ld: " out.log | head -40 | sed 's/^/::error::/'
+
+  windows:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64-msvc
+            os: windows-2025
+            platform: x64
+          - name: windows-arm64-msvc
+            os: windows-11-arm
+            platform: ARM64
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - name: Configure
+        run: |
+          cmake -S . -B build -A ${{ matrix.platform }} -DLB_MINIMAL=ON \
+            "-DLB_BENCH_DEFINITIONS=BENCH_BACKEND_CPU=1;BENCH_ONE_THREAD"
+      - name: Build
+        run: |
+          set -o pipefail
+          cmake --build build --config Release --parallel 2>&1 | tee out.log
+      - name: quill call-site benchmark
+        run: |
+          set -o pipefail
+          ./build/Release/benchmark_quill_unbounded_call_site_latency_int_int_double.exe 2>&1 | tee -a out.log
+      # Annotations can be read without signing in, unlike the log
+      - name: Report
+        if: failure()
+        run: grep -E "error C|error LNK|FAILED|Abort|abort" out.log | head -40 | sed 's/^/::error::/'
