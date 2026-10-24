@@ -65,6 +65,10 @@ public:
       __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(freq));
       // freq is typically exactly 24000000, 50000000, or 1000000000 depending on the SoC
       _ns_per_tick = 1e9 / static_cast<double>(freq);
+#elif defined(_MSC_VER) && defined(_M_ARM64)
+      // CNTFRQ_EL0, read through MSVC's intrinsic as rdtsc() reads CNTVCT_EL0
+      uint64_t const freq = static_cast<uint64_t>(_ReadStatusReg(ARM64_SYSREG(3, 3, 14, 0, 0)));
+      _ns_per_tick = 1e9 / static_cast<double>(freq);
 #else
       // Convert rdtsc to wall time.
       // 1. Get real time and rdtsc current count

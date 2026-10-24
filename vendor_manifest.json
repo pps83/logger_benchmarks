@@ -72,7 +72,7 @@
     {
       "name": "quill_bte",
       "repo_url": "https://github.com/pps83/quill.git",
-      "ref": "770e24cfec4c30ad6e3c2e9da57ca3b32e790a57",
+      "ref": "08bbedb973b53afb9e06164ecb11adc3488e653c",
       "target_dir": "third_party/quill_bte",
       "skip_update": true
     },
