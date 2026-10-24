@@ -58,10 +58,16 @@ jobs:
           cmake --build build --parallel 2>&1 | tee out.log
       # A step that runs out of time fails, so Report still runs; the job's own limit would cancel it
       - name: Logger tests
-        timeout-minutes: 25
+        timeout-minutes: 15
         run: |
           set -o pipefail
+          # A run still going after 10 minutes is stuck: its processes' stacks go to stacks-<pid>.txt for Report
+          (sleep 600; for p in $(pgrep bte_log_tests); do
+             sudo gdb -p $p -batch -ex "thread apply all bt" > stacks-$p.txt 2>&1
+           done; pkill bte_log_tests) > /dev/null 2>&1 &
+          watchdog=$!
           ./build/bte_log_tests 2>&1 | tee -a out.log
+          kill $watchdog
       - name: log_stress
         timeout-minutes: 15
         run: |
@@ -78,7 +84,11 @@ jobs:
           if [ -n "$obj" ]; then
             objdump -d -r --no-show-raw-insn "$obj" | head -400 | block call-site-disassembly || true
           fi
-          tail -40 out.log | block output-tail || true
+          # An annotation holds about 4 KB
+          tail -c 2400 out.log | block output-tail || true
+          for f in stacks-*.txt; do
+            [ -f "$f" ] && grep -E '^(Thread|#)' "$f" | cut -c1-160 | head -24 | block "$f" || true
+          done
           grep -E "error|ERROR|WARNING|SUMMARY|FAILED|Failure|failed|rerun|call site|logCallSite" out.log |
             grep -v " warning: " | head -40 | sed 's/^/::error::/'
 
