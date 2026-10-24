@@ -1,0 +1,23 @@
+name: logsite asm
+
+# The code a LOG call site compiles to on macOS arm64, as annotations readable without signing in
+on:
+  push:
+    branches: [logsite-asm]
+
+jobs:
+  macos:
+    runs-on: macos-15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - name: Compile and show
+        run: |
+          clang++ -O2 -std=c++23 -I bte/src -I third_party/quill_bte/include -I third_party/int128/include \
+            -S -o logsite.s tools/logsite/logsite.cpp
+          for fn in __Z10logLiteralv __Z10logNumbersiid; do
+            awk "/^$fn:/,/\.cfi_endproc/" logsite.s | grep -vE '^[[:space:]]*(\.|;|//|Lloh|$)' | cut -c1-90 > fn.txt
+            echo "::notice title=$fn::$(sed ':a;N;$!ba;s/\n/%0A/g' fn.txt)"
+          done
