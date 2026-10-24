@@ -27,13 +27,31 @@ jobs:
           - name: macos-arm64-clang
             os: macos-15
             cxx: clang++
+          - name: linux-x64-asan
+            os: ubuntu-24.04
+            cxx: clang++-18
+            flags: -fsanitize=address -fno-omit-frame-pointer -g
+          - name: linux-x64-tsan
+            os: ubuntu-24.04
+            cxx: clang++-18
+            flags: -fsanitize=thread -g
+          - name: linux-x64-ubsan
+            os: ubuntu-24.04
+            cxx: clang++-18
+            flags: -fsanitize=undefined -fno-sanitize-recover=undefined -g
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v5
+      # The runners' high-entropy ASLR breaks the sanitizers' shadow memory
+      - name: Sanitizer address space
+        if: matrix.flags
+        run: sudo sysctl vm.mmap_rnd_bits=28
       - name: Configure
-        run: cmake -S bte -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=${{ matrix.cxx }}
+        run: |
+          cmake -S bte -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=${{ matrix.cxx }} \
+            "-DCMAKE_CXX_FLAGS=${{ matrix.flags }}" "-DCMAKE_EXE_LINKER_FLAGS=${{ matrix.flags }}"
       - name: Build
         run: |
           set -o pipefail
@@ -49,7 +67,7 @@ jobs:
       # Annotations can be read without signing in, unlike the log
       - name: Report
         if: failure()
-        run: grep -E "error|warning|FAILED|Failure|failed|rerun" out.log | head -40 | sed 's/^/::error::/'
+        run: grep -E "error|warning|ERROR|WARNING|SUMMARY|FAILED|Failure|failed|rerun" out.log | head -40 | sed 's/^/::error::/'
 
   windows:
     name: ${{ matrix.name }}
@@ -68,13 +86,21 @@ jobs:
           - name: windows-arm64-msvc
             os: windows-11-arm
             platform: ARM64
+          - name: windows-x64-clangcl
+            os: windows-2025
+            platform: x64
+            toolset: -T ClangCL
+          - name: windows-x86-clangcl
+            os: windows-2025
+            platform: Win32
+            toolset: -T ClangCL
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v5
       - name: Configure
-        run: cmake -S bte -B build -A ${{ matrix.platform }}
+        run: cmake -S bte -B build -A ${{ matrix.platform }} ${{ matrix.toolset }}
       - name: Build
         run: |
           set -o pipefail
