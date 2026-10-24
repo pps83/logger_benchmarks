@@ -67,7 +67,9 @@ jobs:
       # Annotations can be read without signing in, unlike the log
       - name: Report
         if: failure()
-        run: grep -E "error|warning|ERROR|WARNING|SUMMARY|FAILED|Failure|failed|rerun" out.log | head -40 | sed 's/^/::error::/'
+        run: |
+          grep -E "error|ERROR|WARNING|SUMMARY|FAILED|Failure|failed|rerun|call site|logCallSite" out.log |
+            grep -v " warning: " | head -40 | sed 's/^/::error::/'
 
   windows:
     name: ${{ matrix.name }}
@@ -116,4 +118,6 @@ jobs:
       # Annotations can be read without signing in, unlike the log
       - name: Report
         if: failure()
-        run: grep -E "error|warning|FAILED|Failure|failed|rerun" out.log | head -40 | sed 's/^/::error::/'
+        run: |
+          grep -E "error|FAILED|Failure|failed|rerun|call site|logCallSite" out.log |
+            grep -v " warning " | head -40 | sed 's/^/::error::/'
