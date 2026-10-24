@@ -1238,7 +1238,7 @@ static void endingAbortHandler(int)
 #else
     static_cast<void>(write(STDERR_FILENO, text, sizeof(text) - 1));
 #endif
-    _exit(1);
+    _Exit(1); // TSan's _exit flushes stdio first, and the blocked logger thread holds stdout's lock
 }
 
 // Nobody reads the pipe, so the logger thread ends up blocked writing stdout, holding stdout's lock and the log's
