@@ -19,6 +19,8 @@ extern "C" unsigned __int64 __rdtsc();
 extern "C" void _m_prefetchw(volatile const void*);
 #pragma intrinsic(__rdtsc)
 #pragma intrinsic(_m_prefetchw)
+#elif defined(_MSC_VER) && defined(_M_ARM64) && !defined(__aarch64__)
+#include <intrin.h>
 #endif
 
 void LOG(std::string_view text = std::string_view());
@@ -724,8 +726,11 @@ FORCEINLINE uint64_t timestamp()
     uint64_t value;
     __asm__ volatile("mrs %0, cntvct_el0" : "=r"(value));
     return value;
+#elif defined(_MSC_VER) && defined(_M_ARM64)
+    // CNTVCT_EL0, as above: MSVC has no GCC-style asm
+    return static_cast<uint64_t>(_ReadStatusReg(ARM64_SYSREG(3, 3, 14, 0, 2)));
 #else
-    // Quill's own clock: a steady one on MSVC ARM64 and 32-bit ARM, which LOG would otherwise have to copy exactly
+    // Quill's own clock: a steady one on 32-bit ARM, which LOG would otherwise have to copy exactly
     return quillCounter();
 #endif
 }

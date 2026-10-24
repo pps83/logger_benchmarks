@@ -14,6 +14,10 @@
 #if defined(__ARM_ARCH) || defined(_M_ARM) || defined(_M_ARM64) || defined(__PPC64__)
   // ARM or PowerPC — use ChronoTimeUtils for timestamping
   #include "quill/core/ChronoTimeUtils.h"
+  #if defined(_MSC_VER) && defined(_M_ARM64) && !defined(__aarch64__)
+    // _ReadStatusReg and ARM64_SYSREG
+    #include <intrin.h>
+  #endif
 
 #elif defined(__riscv) || defined(__s390x__) || defined(__loongarch64)
 // RISC-V, IBM Z (s390x), or LoongArch — no special intrinsics required
@@ -48,6 +52,12 @@ QUILL_NODISCARD QUILL_ATTRIBUTE_HOT inline uint64_t rdtsc() noexcept
   __asm__ volatile("mrs %0, cntvct_el0" : "=r"(virtual_timer_value));
   return static_cast<uint64_t>(virtual_timer_value);
 }
+#elif defined(_MSC_VER) && defined(_M_ARM64)
+// arm64 with MSVC, which has no GCC-style asm: the same CNTVCT_EL0 read through its intrinsic
+QUILL_NODISCARD QUILL_ATTRIBUTE_HOT inline uint64_t rdtsc() noexcept
+{
+  return static_cast<uint64_t>(_ReadStatusReg(ARM64_SYSREG(3, 3, 14, 0, 2)));
+}
 #elif (defined(__ARM_ARCH) && !defined(_MSC_VER))
 QUILL_NODISCARD QUILL_ATTRIBUTE_HOT inline uint64_t rdtsc() noexcept
 {
@@ -78,7 +88,7 @@ QUILL_NODISCARD QUILL_ATTRIBUTE_HOT inline uint64_t rdtsc() noexcept
   __asm__ volatile("stck %0" : "=Q"(tsc) : : "cc");
   return tsc;
 }
-#elif (defined(_M_ARM) || defined(_M_ARM64) || defined(__PPC64__) || defined(__PPC__))
+#elif (defined(_M_ARM) || defined(__PPC64__) || defined(__PPC__))
 QUILL_NODISCARD QUILL_ATTRIBUTE_HOT inline uint64_t rdtsc() noexcept
 {
   // soft failover
