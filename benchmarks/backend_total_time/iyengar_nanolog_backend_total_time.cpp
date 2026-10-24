@@ -68,7 +68,8 @@ int main()
   auto const start_time = std::chrono::steady_clock::now();
   for (size_t iteration = 0; iteration < total_iterations; ++iteration)
   {
-    LOG_INFO << "Iteration: " << iteration << " int: " << iteration * 2
+    // NanoLog takes uint64_t, which macOS does not spell as size_t's unsigned long
+    LOG_INFO << "Iteration: " << static_cast<uint64_t>(iteration) << " int: " << static_cast<uint64_t>(iteration * 2)
              << " double: " << static_cast<double>(iteration) / 2;
   }
   LOG_CRIT << end_marker;
