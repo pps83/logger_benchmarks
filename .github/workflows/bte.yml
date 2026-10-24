@@ -10,7 +10,7 @@ jobs:
   posix:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -56,11 +56,14 @@ jobs:
         run: |
           set -o pipefail
           cmake --build build --parallel 2>&1 | tee out.log
+      # A step that runs out of time fails, so Report still runs; the job's own limit would cancel it
       - name: Logger tests
+        timeout-minutes: 25
         run: |
           set -o pipefail
-          ./build/bte_log_tests --gtest_brief=1 2>&1 | tee -a out.log
+          ./build/bte_log_tests 2>&1 | tee -a out.log
       - name: log_stress
+        timeout-minutes: 15
         run: |
           set -o pipefail
           ./build/log_stress --runs 3 2>&1 | tee -a out.log
@@ -75,6 +78,7 @@ jobs:
           if [ -n "$obj" ]; then
             objdump -d -r --no-show-raw-insn "$obj" | head -400 | block call-site-disassembly || true
           fi
+          tail -40 out.log | block output-tail || true
           grep -E "error|ERROR|WARNING|SUMMARY|FAILED|Failure|failed|rerun|call site|logCallSite" out.log |
             grep -v " warning: " | head -40 | sed 's/^/::error::/'
 
