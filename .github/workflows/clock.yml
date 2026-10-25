@@ -12,7 +12,7 @@ on:
     inputs:
       seconds:
         description: Seconds to measure
-        default: '900'
+        default: '3600'
       more:
         description: Runs to start after this one, one after another
         default: '0'
@@ -21,7 +21,7 @@ jobs:
   drift:
     name: ${{ matrix.name }} ${{ matrix.copy }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 40
+    timeout-minutes: 80
     strategy:
       fail-fast: false
       matrix:
@@ -70,15 +70,19 @@ jobs:
           set -o pipefail
           exe=build/clock_drift
           [ -x "$exe" ] || exe=build/Release/clock_drift.exe
-          "$exe" "${{ github.event.inputs.seconds || '900' }}" | tee drift.txt
+          "$exe" "${{ github.event.inputs.seconds || '3600' }}" | tee drift.txt
           { echo '<details><summary>every round, every address (drift.csv)</summary>'; echo; echo '```'; cat drift.csv
             echo '```'; echo '</details>'; } >> "$GITHUB_STEP_SUMMARY"
           # The machine, the report and the rounds as annotations too, which the API serves without signing in
           annotate() { sed 's/%/%25/g' | head -c 16000 | awk '{printf "%s%%0A", $0}'; }
           report=$({ cat machine.txt; grep -v '^round ' drift.txt; } | annotate)
           echo "::notice title=clock drift ${{ matrix.name }} ${{ matrix.copy }}::$report"
-          rounds=$(grep '^round ' drift.txt | annotate)
-          echo "::notice title=rounds ${{ matrix.name }} ${{ matrix.copy }}::$rounds"
+          # An annotation keeps its first 4 KB, so the rounds go in parts of whole lines
+          grep '^round ' drift.txt | awk 'BEGIN { part = 0 } { if (size + length($0) > 3800) { part++; size = 0 }
+            size += length($0) + 1; print > ("rounds-" part ".txt") }'
+          for f in rounds-*.txt; do
+            echo "::notice title=rounds ${{ matrix.name }} ${{ matrix.copy }} ${f//[^0-9]/}::$(annotate < "$f")"
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: drift-${{ matrix.name }}-${{ matrix.copy }}
@@ -96,7 +100,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           MORE: ${{ github.event_name == 'push' && '5' || github.event.inputs.more || '0' }}
-          SECONDS_TO_MEASURE: ${{ github.event.inputs.seconds || '900' }}
+          SECONDS_TO_MEASURE: ${{ github.event.inputs.seconds || '3600' }}
         run: |
           if [ "$MORE" -gt 0 ]; then
             gh workflow run clock.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
