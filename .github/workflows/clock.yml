@@ -7,7 +7,7 @@ on:
       - bte/clock_drift.cpp
       - .github/workflows/clock.yml
   schedule:
-    - cron: '17 */6 * * *'
+    - cron: '17 * * * *'
   workflow_dispatch:
     inputs:
       seconds:
@@ -16,12 +16,15 @@ on:
 
 jobs:
   drift:
-    name: ${{ matrix.name }}
+    name: ${{ matrix.name }} ${{ matrix.copy }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
+        # Three of each at once: each lands on whatever machine is free, so a run measures more machines
+        copy: [1, 2, 3]
+        name: [linux-x64, linux-arm64, macos-arm64, windows-x64, windows-x86, windows-arm64]
         include:
           - name: linux-x64
             os: ubuntu-24.04
@@ -70,8 +73,8 @@ jobs:
           # The machine and the report as an annotation too, which the API serves without signing in
           report=$({ cat machine.txt; grep -v '^round ' drift.txt; grep '^round ' drift.txt; } | head -c 16000 |
                    sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
-          echo "::notice title=clock drift ${{ matrix.name }}::$report"
+          echo "::notice title=clock drift ${{ matrix.name }} ${{ matrix.copy }}::$report"
       - uses: actions/upload-artifact@v4
         with:
-          name: drift-${{ matrix.name }}
+          name: drift-${{ matrix.name }}-${{ matrix.copy }}
           path: drift.csv
