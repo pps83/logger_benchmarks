@@ -13,6 +13,9 @@ on:
       seconds:
         description: Seconds to measure
         default: '900'
+      more:
+        description: Runs to start after this one, one after another
+        default: '0'
 
 jobs:
   drift:
@@ -70,11 +73,32 @@ jobs:
           "$exe" "${{ github.event.inputs.seconds || '900' }}" | tee drift.txt
           { echo '<details><summary>every round, every address (drift.csv)</summary>'; echo; echo '```'; cat drift.csv
             echo '```'; echo '</details>'; } >> "$GITHUB_STEP_SUMMARY"
-          # The machine and the report as an annotation too, which the API serves without signing in
-          report=$({ cat machine.txt; grep -v '^round ' drift.txt; grep '^round ' drift.txt; } | head -c 16000 |
-                   sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+          # The machine, the report and the rounds as annotations too, which the API serves without signing in
+          annotate() { sed 's/%/%25/g' | head -c 16000 | awk '{printf "%s%%0A", $0}'; }
+          report=$({ cat machine.txt; grep -v '^round ' drift.txt; } | annotate)
           echo "::notice title=clock drift ${{ matrix.name }} ${{ matrix.copy }}::$report"
+          rounds=$(grep '^round ' drift.txt | annotate)
+          echo "::notice title=rounds ${{ matrix.name }} ${{ matrix.copy }}::$rounds"
       - uses: actions/upload-artifact@v4
         with:
           name: drift-${{ matrix.name }}-${{ matrix.copy }}
           path: drift.csv
+
+  # A push starts 5 more runs, one after another, for more machines; a dispatch as many as its input says
+  next:
+    needs: drift
+    if: always()
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    steps:
+      - name: Start the next run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MORE: ${{ github.event_name == 'push' && '5' || github.event.inputs.more || '0' }}
+          SECONDS_TO_MEASURE: ${{ github.event.inputs.seconds || '900' }}
+        run: |
+          if [ "$MORE" -gt 0 ]; then
+            gh workflow run clock.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
+              -f more=$((MORE - 1)) -f seconds="$SECONDS_TO_MEASURE"
+          fi
