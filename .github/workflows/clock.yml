@@ -12,7 +12,7 @@ on:
     inputs:
       seconds:
         description: Seconds to measure
-        default: '600'
+        default: '900'
 
 jobs:
   drift:
@@ -64,11 +64,12 @@ jobs:
           set -o pipefail
           exe=build/clock_drift
           [ -x "$exe" ] || exe=build/Release/clock_drift.exe
-          "$exe" "${{ github.event.inputs.seconds || '600' }}" | tee drift.txt
+          "$exe" "${{ github.event.inputs.seconds || '900' }}" | tee drift.txt
           { echo '<details><summary>every round, every address (drift.csv)</summary>'; echo; echo '```'; cat drift.csv
             echo '```'; echo '</details>'; } >> "$GITHUB_STEP_SUMMARY"
           # The machine and the report as an annotation too, which the API serves without signing in
-          report=$(cat machine.txt drift.txt | tail -c 7000 | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+          report=$({ cat machine.txt; grep -v '^round ' drift.txt; grep '^round ' drift.txt; } | head -c 16000 |
+                   sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
           echo "::notice title=clock drift ${{ matrix.name }}::$report"
       - uses: actions/upload-artifact@v4
         with:

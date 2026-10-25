@@ -36,12 +36,36 @@ static const char* const kServers[] = {
 };
 
 #ifdef _WIN32
-enum Clock { kBte, kTsc, kSystem, kSteady, kClocks };
-static const char* const kClockNames[kClocks] = {"bte timeTicks", "bte tsc", "system", "steady"};
+enum Clock { kBte, kTsc, kSystem, kSteady, kHighRes, kInterrupt, kUnbiased, kClocks };
+static const char* const kClockNames[kClocks] = {"bte timeTicks", "bte tsc", "system", "steady", "high_resolution",
+                                                 "QueryInterruptTimePrecise", "QueryUnbiasedInterruptTimePrecise"};
+
+using InterruptTimeFunc = void(WINAPI*)(PULONGLONG);
+
+static InterruptTimeFunc interruptTimeFunc(const char* name)
+{
+    return reinterpret_cast<InterruptTimeFunc>(GetProcAddress(GetModuleHandleW(L"kernelbase.dll"), name));
+}
+
+// 100 ns units, or 0 where Windows has no such function
+static int64_t interruptNs(InterruptTimeFunc func)
+{
+    ULONGLONG t = 0;
+    if (func)
+        func(&t);
+    return int64_t(t) * 100;
+}
 #else
-enum Clock { kBte, kTsc, kSystem, kSteady, kMonotonic, kMonotonicRaw, kClocks };
-static const char* const kClockNames[kClocks] = {"bte timeTicks", "bte tsc", "system", "steady", "CLOCK_MONOTONIC",
-                                                 "CLOCK_MONOTONIC_RAW"};
+#ifdef __APPLE__
+#define CLOCK_EXTRA CLOCK_UPTIME_RAW
+#define CLOCK_EXTRA_NAME "CLOCK_UPTIME_RAW"
+#else
+#define CLOCK_EXTRA CLOCK_BOOTTIME
+#define CLOCK_EXTRA_NAME "CLOCK_BOOTTIME"
+#endif
+enum Clock { kBte, kTsc, kSystem, kSteady, kHighRes, kMonotonic, kMonotonicRaw, kExtra, kClocks };
+static const char* const kClockNames[kClocks] = {"bte timeTicks", "bte tsc", "system", "steady", "high_resolution",
+                                                 "CLOCK_MONOTONIC", "CLOCK_MONOTONIC_RAW", CLOCK_EXTRA_NAME};
 
 static int64_t clockNs(clockid_t id)
 {
@@ -65,9 +89,17 @@ static Clocks readClocks()
         std::chrono::system_clock::now().time_since_epoch()).count();
     c.ns[kSteady] = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
-#ifndef _WIN32
+    c.ns[kHighRes] = std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::high_resolution_clock::now().time_since_epoch()).count();
+#ifdef _WIN32
+    static const InterruptTimeFunc interrupt = interruptTimeFunc("QueryInterruptTimePrecise");
+    static const InterruptTimeFunc unbiased = interruptTimeFunc("QueryUnbiasedInterruptTimePrecise");
+    c.ns[kInterrupt] = interruptNs(interrupt);
+    c.ns[kUnbiased] = interruptNs(unbiased);
+#else
     c.ns[kMonotonic] = clockNs(CLOCK_MONOTONIC);
     c.ns[kMonotonicRaw] = clockNs(CLOCK_MONOTONIC_RAW);
+    c.ns[kExtra] = clockNs(CLOCK_EXTRA);
 #endif
     return c;
 }
@@ -125,6 +157,17 @@ static bool queryOnce(const Peer& peer, int64_t start, Sample& sample)
     for (int k = 0; k < kClocks; ++k)
         sample.offset[k] = ((t2 - t1.ns[k]) + (t3 - t4.ns[k])) / 2;
     return true;
+}
+
+// ppm with 3 decimals as an integer: the offset's change in ns over the elapsed ns, times 1e9
+static int64_t ppmMilli(const Sample& first, const Sample& last, int k)
+{
+    return (last.offset[k] - first.offset[k]) * 1000000000 / (last.at - first.at);
+}
+
+static void printPpm(FILE* f, int64_t milli)
+{
+    fprintf(f, "%s%lld.%03lld", milli < 0 ? "-" : "+", llabs(milli) / 1000, llabs(milli) % 1000);
 }
 
 // The query with the shortest round trip of `count`, added to the peer's samples
@@ -186,19 +229,21 @@ static void logRound(FILE* csv, const std::vector<Peer>& peers, int round)
                 fprintf(csv, ",%lld", static_cast<long long>(s.offset[k]));
             fputc('\n', csv);
         }
-        if (s.stratum <= 2 && s.rtt < 50000000)
+        if (s.stratum <= 2 && s.rtt < 50000000 && s.at > first.at)
         {
             for (int k = 0; k < kClocks; ++k)
-                changes[k].push_back(s.offset[k] - first.offset[k]);
+                changes[k].push_back(ppmMilli(first, s, k));
         }
     }
-    printf("round %d: %s; median offset change since the start, us:", round, osCorrection().c_str());
+    printf("round %d: %s; median rate since the start, ppm:", round, osCorrection().c_str());
     for (int k = 0; k < kClocks; ++k)
     {
         if (changes[k].empty())
             continue;
         std::sort(changes[k].begin(), changes[k].end());
-        printf(" %s %+lld;", kClockNames[k], static_cast<long long>(changes[k][changes[k].size() / 2] / 1000));
+        printf(" %s ", kClockNames[k]);
+        printPpm(stdout, changes[k][changes[k].size() / 2]);
+        putchar(';');
     }
     printf(" (%zu)\n", changes[kBte].size());
     fflush(stdout);
@@ -232,17 +277,6 @@ static std::vector<Peer> resolvePeers()
         freeaddrinfo(result);
     }
     return peers;
-}
-
-// ppm with 3 decimals as an integer: the offset's change in ns over the elapsed ns, times 1e9
-static int64_t ppmMilli(const Sample& first, const Sample& last, int k)
-{
-    return (last.offset[k] - first.offset[k]) * 1000000000 / (last.at - first.at);
-}
-
-static void printPpm(FILE* f, int64_t milli)
-{
-    fprintf(f, "%s%lld.%03lld", milli < 0 ? "-" : "+", llabs(milli) / 1000, llabs(milli) % 1000);
 }
 
 #ifdef __linux__
@@ -308,7 +342,7 @@ static void report(FILE* f, const std::vector<Peer>& peers, bool markdown)
 
 int main(int argc, char** argv)
 {
-    const int seconds = argc > 1 ? atoi(argv[1]) : 600;
+    const int seconds = argc > 1 ? atoi(argv[1]) : 900;
 #ifdef _WIN32
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
