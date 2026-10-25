@@ -68,3 +68,10 @@ endif()
 add_executable(log_stress src/test/LogStress.cpp src/random.cpp)
 target_include_directories(log_stress PRIVATE src/test)
 target_link_libraries(log_stress PRIVATE btelog)
+
+# Built by clock.yml only
+add_executable(clock_drift EXCLUDE_FROM_ALL clock_drift.cpp)
+target_link_libraries(clock_drift PRIVATE btelog)
+if (WIN32)
+    target_link_libraries(clock_drift PRIVATE ws2_32)
+endif()

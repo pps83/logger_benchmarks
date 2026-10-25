@@ -1,0 +1,63 @@
+name: clock drift
+
+# bte's clocks, the system clock and the steady clock against every NTP server address, per runner (bte/clock_drift.cpp)
+on:
+  push:
+    paths:
+      - bte/clock_drift.cpp
+      - .github/workflows/clock.yml
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds to measure
+        default: '600'
+
+jobs:
+  drift:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x64
+            os: ubuntu-24.04
+            configure: -DCMAKE_CXX_COMPILER=g++-14
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            configure: -DCMAKE_CXX_COMPILER=g++-14
+          - name: macos-arm64
+            os: macos-15
+          - name: windows-x64
+            os: windows-2025
+            configure: -A x64
+          - name: windows-arm64
+            os: windows-11-arm
+            configure: -A ARM64
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - name: Configure
+        run: cmake -S bte -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.configure }}
+      - name: Build
+        run: cmake --build build --config Release --target clock_drift --parallel
+      - name: Machine
+        run: |
+          echo "### ${{ matrix.name }}" >> "$GITHUB_STEP_SUMMARY"
+          case "$RUNNER_OS" in
+            Linux) grep -m1 'model name' /proc/cpuinfo || true; timedatectl timesync-status 2>/dev/null | head -12 || true
+                   cat /sys/devices/system/clocksource/clocksource0/current_clocksource || true ;;
+            macOS) sysctl -n machdep.cpu.brand_string || true ;;
+            Windows) powershell -Command "(Get-CimInstance Win32_Processor).Name; w32tm /query /status" || true ;;
+          esac | tee -a machine.txt
+          { echo '```'; cat machine.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Measure
+        run: |
+          exe=build/clock_drift
+          [ -x "$exe" ] || exe=build/Release/clock_drift.exe
+          "$exe" "${{ github.event.inputs.seconds || '600' }}"
