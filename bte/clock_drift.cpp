@@ -19,6 +19,7 @@ using Socket = SOCKET;
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 using Socket = int;
 #define INVALID_SOCKET (-1)
@@ -34,8 +35,21 @@ static const char* const kServers[] = {
     "time.nplindia.org", "ntp1.vniiftri.ru", "ptbtime1.ptb.de", "a.st1.ntp.br",
 };
 
+#ifdef _WIN32
 enum Clock { kBte, kTsc, kSystem, kSteady, kClocks };
 static const char* const kClockNames[kClocks] = {"bte timeTicks", "bte tsc", "system", "steady"};
+#else
+enum Clock { kBte, kTsc, kSystem, kSteady, kMonotonic, kMonotonicRaw, kClocks };
+static const char* const kClockNames[kClocks] = {"bte timeTicks", "bte tsc", "system", "steady", "CLOCK_MONOTONIC",
+                                                 "CLOCK_MONOTONIC_RAW"};
+
+static int64_t clockNs(clockid_t id)
+{
+    timespec ts;
+    clock_gettime(id, &ts);
+    return int64_t(ts.tv_sec) * 1000000000 + ts.tv_nsec;
+}
+#endif
 
 struct Clocks
 {
@@ -51,6 +65,10 @@ static Clocks readClocks()
         std::chrono::system_clock::now().time_since_epoch()).count();
     c.ns[kSteady] = std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now().time_since_epoch()).count();
+#ifndef _WIN32
+    c.ns[kMonotonic] = clockNs(CLOCK_MONOTONIC);
+    c.ns[kMonotonicRaw] = clockNs(CLOCK_MONOTONIC_RAW);
+#endif
     return c;
 }
 
@@ -60,6 +78,7 @@ struct Sample
     int64_t rtt;    // ns, the server's own time taken off
     int64_t offset[kClocks];
     int stratum;
+    int round;
 };
 
 struct Peer
@@ -109,7 +128,7 @@ static bool queryOnce(const Peer& peer, int64_t start, Sample& sample)
 }
 
 // The query with the shortest round trip of `count`, added to the peer's samples
-static void burst(Peer& peer, int count, int64_t start)
+static void burst(Peer& peer, int count, int64_t start, int round)
 {
     Sample best = {};
     bool any = false;
@@ -122,8 +141,67 @@ static void burst(Peer& peer, int count, int64_t start)
             any = true;
         }
     }
+    best.round = round;
     if (any)
         peer.samples.push_back(best);
+}
+
+// The OS's own correction of the system clock right now
+static std::string osCorrection()
+{
+    char text[256] = "";
+#ifdef __linux__
+    timex tx = {};
+    const int state = adjtimex(&tx);
+    snprintf(text, sizeof(text),
+             "adjtimex state %d freq %ld (ppm << 16) offset %ld tick %ld status 0x%x maxerror %ld us esterror %ld us "
+             "constant %ld", state, tx.freq, tx.offset, tx.tick, tx.status, tx.maxerror, tx.esterror, tx.constant);
+#elif defined(_WIN32)
+    DWORD64 adjustment = 0, increment = 0;
+    BOOL disabled = FALSE;
+    if (GetSystemTimeAdjustmentPrecise(&adjustment, &increment, &disabled))
+    {
+        snprintf(text, sizeof(text), "GetSystemTimeAdjustmentPrecise adjustment %llu increment %llu disabled %d",
+                 static_cast<unsigned long long>(adjustment), static_cast<unsigned long long>(increment), disabled);
+    }
+#endif
+    return text;
+}
+
+// One CSV line per address answered in this round, and on stdout the round's median offset change since the start
+static void logRound(FILE* csv, const std::vector<Peer>& peers, int round)
+{
+    std::vector<int64_t> changes[kClocks];
+    for (const Peer& peer : peers)
+    {
+        if (peer.samples.empty() || peer.samples.back().round != round)
+            continue;
+        const Sample& first = peer.samples.front();
+        const Sample& s = peer.samples.back();
+        if (csv)
+        {
+            fprintf(csv, "%d,%lld,%s,%s,%d,%lld", round, static_cast<long long>(s.at / 1000000), peer.server.c_str(),
+                    peer.address.c_str(), s.stratum, static_cast<long long>(s.rtt));
+            for (int k = 0; k < kClocks; ++k)
+                fprintf(csv, ",%lld", static_cast<long long>(s.offset[k]));
+            fputc('\n', csv);
+        }
+        if (s.stratum <= 2 && s.rtt < 50000000)
+        {
+            for (int k = 0; k < kClocks; ++k)
+                changes[k].push_back(s.offset[k] - first.offset[k]);
+        }
+    }
+    printf("round %d: %s; median offset change since the start, us:", round, osCorrection().c_str());
+    for (int k = 0; k < kClocks; ++k)
+    {
+        if (changes[k].empty())
+            continue;
+        std::sort(changes[k].begin(), changes[k].end());
+        printf(" %s %+lld;", kClockNames[k], static_cast<long long>(changes[k][changes[k].size() / 2] / 1000));
+    }
+    printf(" (%zu)\n", changes[kBte].size());
+    fflush(stdout);
 }
 
 static std::vector<Peer> resolvePeers()
@@ -182,14 +260,19 @@ static void report(FILE* f, const std::vector<Peer>& peers, bool markdown)
     fprintf(f, markdown ? "| server | address | stratum | samples | round trip ms |" : "server address stratum samples rtt_ms");
     for (const char* name : kClockNames)
         fprintf(f, markdown ? " %s ppm |" : " [%s]", name);
-    fprintf(f, markdown ? "\n|---|---|---|---|---|---|---|---|---|\n" : "\n");
+    fputc('\n', f);
+    for (int column = 0; markdown && column < 5 + kClocks; ++column)
+        fputs(column + 1 < 5 + kClocks ? "|---" : "|---|\n", f);
     std::vector<int64_t> rates[kClocks];
     for (const Peer& peer : peers)
     {
         if (peer.samples.size() < 2)
         {
-            fprintf(f, markdown ? "| %s | %s | | %zu | | | | | |\n" : "%s %s - %zu\n", peer.server.c_str(),
-                    peer.address.c_str(), peer.samples.size());
+            fprintf(f, markdown ? "| %s | %s | | %zu |" : "%s %s - %zu", peer.server.c_str(), peer.address.c_str(),
+                    peer.samples.size());
+            for (int column = 0; markdown && column <= kClocks; ++column)
+                fputs(" |", f);
+            fputc('\n', f);
             continue;
         }
         const Sample& first = peer.samples.front();
@@ -234,22 +317,34 @@ int main(int argc, char** argv)
 #ifdef __linux__
     const long long freqStart = kernelFreqMilliPpm();
 #endif
+    FILE* csv = fopen("drift.csv", "w");
+    if (csv)
+    {
+        fprintf(csv, "round,seconds,server,address,stratum,rtt_ns");
+        for (const char* name : kClockNames)
+            fprintf(csv, ",%s offset ns", name);
+        fputc('\n', csv);
+    }
     const int64_t start = readClocks().ns[kSteady];
     for (Peer& peer : peers)
-        burst(peer, 8, start);
-    for (int minute = 1; minute * 60 < seconds; ++minute)
+        burst(peer, 8, start, 0);
+    logRound(csv, peers, 0);
+    int round = 1;
+    for (; round * 60 < seconds; ++round)
     {
         std::this_thread::sleep_until(std::chrono::steady_clock::time_point(std::chrono::nanoseconds(start)) +
-                                      std::chrono::seconds(minute * 60));
+                                      std::chrono::seconds(round * 60));
         for (Peer& peer : peers)
-            burst(peer, 3, start);
-        printf("minute %d done\n", minute);
-        fflush(stdout);
+            burst(peer, 3, start, round);
+        logRound(csv, peers, round);
     }
     std::this_thread::sleep_until(std::chrono::steady_clock::time_point(std::chrono::nanoseconds(start)) +
                                   std::chrono::seconds(seconds));
     for (Peer& peer : peers)
-        burst(peer, 8, start);
+        burst(peer, 8, start, round);
+    logRound(csv, peers, round);
+    if (csv)
+        fclose(csv);
 
     report(stdout, peers, false);
 #ifdef __linux__
