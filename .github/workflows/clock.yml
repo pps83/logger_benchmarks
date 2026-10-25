@@ -34,6 +34,9 @@ jobs:
           - name: windows-x64
             os: windows-2025
             configure: -A x64
+          - name: windows-x86
+            os: windows-2025
+            configure: -A Win32
           - name: windows-arm64
             os: windows-11-arm
             configure: -A ARM64
