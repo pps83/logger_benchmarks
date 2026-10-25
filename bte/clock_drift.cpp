@@ -200,9 +200,13 @@ static std::string osCorrection()
              "adjtimex state %d freq %ld (ppm << 16) offset %ld tick %ld status 0x%x maxerror %ld us esterror %ld us "
              "constant %ld", state, tx.freq, tx.offset, tx.tick, tx.status, tx.maxerror, tx.esterror, tx.constant);
 #elif defined(_WIN32)
+    // Through GetProcAddress: the import library that has it is not kernel32.lib
+    using AdjustmentFunc = BOOL(WINAPI*)(PDWORD64, PDWORD64, PBOOL);
+    static const auto getAdjustment = reinterpret_cast<AdjustmentFunc>(
+        GetProcAddress(GetModuleHandleW(L"kernelbase.dll"), "GetSystemTimeAdjustmentPrecise"));
     DWORD64 adjustment = 0, increment = 0;
     BOOL disabled = FALSE;
-    if (GetSystemTimeAdjustmentPrecise(&adjustment, &increment, &disabled))
+    if (getAdjustment && getAdjustment(&adjustment, &increment, &disabled))
     {
         snprintf(text, sizeof(text), "GetSystemTimeAdjustmentPrecise adjustment %llu increment %llu disabled %d",
                  static_cast<unsigned long long>(adjustment), static_cast<unsigned long long>(increment), disabled);
