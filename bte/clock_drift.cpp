@@ -1,4 +1,4 @@
-// clock_drift [seconds] [first steered round]: each clock's rate against each NTP server's address in ppm, + is slow
+// clock_drift [seconds]: each clock's rate against each NTP server address on its own, in ppm (positive: slow)
 #include "sysutil.h"
 #include <stdint.h>
 #include <stdio.h>
@@ -82,7 +82,7 @@ struct Clocks
     int64_t ns[kClocks];
 };
 
-// From the first steered round on, bte's clock at NTP's rate, set each round; never stepped, so it stays monotonic
+// bte's clock steered onto NTP each round by its rate alone; never stepped, so it stays monotonic
 struct Steering
 {
     int64_t fromBte = 0; // bte's clock in ns where the current rate starts
@@ -271,76 +271,80 @@ static void logRound(FILE* csv, const std::vector<Peer>& peers, int round)
     fflush(stdout);
 }
 
-// A clock's median rate over the addresses that answered this round, since each one's answer in round `from`
-static bool medianRate(const std::vector<Peer>& peers, int round, int from, int k, int64_t& milli)
+// How much further NTP got ahead of a clock since the start, in ns: the median over the addresses that answered now
+static bool medianChange(const std::vector<Peer>& peers, int round, int k, int64_t& ns)
 {
-    std::vector<int64_t> rates;
+    std::vector<int64_t> changes;
     for (const Peer& peer : peers)
     {
-        if (peer.samples.empty() || peer.samples.back().round != round)
+        if (peer.samples.empty() || peer.samples.back().round != round || peer.samples.front().round != 0)
             continue;
-        const auto first = std::find_if(peer.samples.begin(), peer.samples.end(),
-                                        [from](const Sample& s) { return s.round == from; });
         const Sample& s = peer.samples.back();
-        if (first != peer.samples.end() && s.stratum <= 2 && s.rtt < 50000000 && s.at > first->at)
-            rates.push_back(ppmMilli(*first, s, k));
+        if (s.stratum <= 2 && s.rtt < 50000000 && round > 0)
+            changes.push_back(s.offset[k] - peer.samples.front().offset[k]);
     }
-    if (rates.empty())
+    if (changes.empty())
         return false;
-    std::sort(rates.begin(), rates.end());
-    milli = rates[rates.size() / 2];
+    std::sort(changes.begin(), changes.end());
+    ns = changes[changes.size() / 2];
     return true;
 }
 
-// From now on the steered clock makes up bte's rate against NTP since the start
-static void steer(const std::vector<Peer>& peers, int round)
-{
-    int64_t slowMilli = 0;
-    if (!medianRate(peers, round, 0, kBte, slowMilli))
-        return;
-    const int64_t bteNow = ticksToNano(timeTicks());
-    gSteering = {bteNow, steeredNs(bteNow), 1 / (1 - static_cast<double>(slowMilli) * 1e-9)};
-    printf("round %d steering: bte timeTicks ", round);
-    printPpm(stdout, slowMilli);
-    printf(" ppm since the start, so the steered clock runs that much faster from here\n");
-}
+constexpr size_t kFitRounds = 30;
+constexpr double kPullNs = 300e9;
 
-#ifndef _WIN32
-// The steered clock against CLOCK_MONOTONIC, which the OS keeps at NTP's rate, from the first steered round
-struct Apart
+// bte's offset from NTP since the start at each round, ns, for the rate's fit
+struct Point
 {
-    int64_t at; // steady clock, ns since the start
-    int64_t ns; // the steered clock less CLOCK_MONOTONIC
+    double at;
+    double offset;
 };
 
-static Clocks gApartBase;
-static std::vector<Apart> gApart;
-#endif
+static std::vector<Point> gPoints = {{0, 0}};
 
-static void compareSteered(const std::vector<Peer>& peers, int round, int firstSteered, [[maybe_unused]] int64_t start)
+// From now on: bte's rate against NTP over the last rounds, plus the steered clock's distance from NTP over kPullNs
+static void steer(const std::vector<Peer>& peers, int round, int64_t start)
 {
-    printf("round %d steered:", round);
-    int64_t milli = 0;
-    if (round > firstSteered && medianRate(peers, round, firstSteered, kSteered, milli))
+    int64_t offset = 0;
+    if (!medianChange(peers, round, kBte, offset))
+        return;
+    gPoints.push_back({60e9 * round, static_cast<double>(offset)});
+    const size_t first = gPoints.size() > kFitRounds + 1 ? gPoints.size() - kFitRounds - 1 : 0;
+    const double n = static_cast<double>(gPoints.size() - first);
+    double meanAt = 0, meanOffset = 0;
+    for (size_t i = first; i < gPoints.size(); ++i)
     {
-        printf(" rate since round %d ", firstSteered);
-        printPpm(stdout, milli);
-        printf(" ppm;");
+        meanAt += gPoints[i].at / n;
+        meanOffset += gPoints[i].offset / n;
     }
-#ifndef _WIN32
+    double covariance = 0, variance = 0;
+    for (size_t i = first; i < gPoints.size(); ++i)
+    {
+        covariance += (gPoints[i].at - meanAt) * (gPoints[i].offset - meanOffset);
+        variance += (gPoints[i].at - meanAt) * (gPoints[i].at - meanAt);
+    }
+    const double slope = covariance / variance;
     const Clocks c = readClocks();
-    if (gApart.empty())
-        gApartBase = c;
-    const int64_t ns = (c.ns[kSteered] - gApartBase.ns[kSteered]) - (c.ns[kMonotonic] - gApartBase.ns[kMonotonic]);
-    gApart.push_back({c.ns[kSteady] - start, ns});
-    printf(" ahead of CLOCK_MONOTONIC by %lld us since round %d", static_cast<long long>(ns / 1000), firstSteered);
-    if (gApart.size() > 10)
-    {
-        const Apart& before = gApart[gApart.size() - 11];
-        printf(", faster by ");
-        printPpm(stdout, (ns - before.ns) * 1000000000 / (gApart.back().at - before.at));
-        printf(" ppm over the last 10 rounds");
-    }
+    const double now = static_cast<double>(c.ns[kSteady] - start);
+    const double behind = meanOffset + slope * (now - meanAt) - static_cast<double>(c.ns[kSteered] - c.ns[kBte]);
+    gSteering = {c.ns[kBte], c.ns[kSteered], 1 + std::clamp(slope + behind / kPullNs, -500e-6, 500e-6)};
+}
+
+// The steered clock against NTP, and against CLOCK_MONOTONIC, which Linux keeps on NTP, since the start
+static void compareSteered(const std::vector<Peer>& peers, int round, [[maybe_unused]] const Clocks& startClocks)
+{
+    printf("round %d steered: runs ", round);
+    printPpm(stdout, static_cast<int64_t>((gSteering.rate - 1) * 1e9));
+    printf(" ppm faster than bte's clock;");
+    int64_t behind = 0;
+    if (medianChange(peers, round, kSteered, behind))
+        printf(" NTP ahead of it by %lld us;", static_cast<long long>(behind / 1000));
+#ifndef _WIN32
+    if (medianChange(peers, round, kMonotonic, behind))
+        printf(" NTP ahead of CLOCK_MONOTONIC by %lld us;", static_cast<long long>(behind / 1000));
+    const Clocks c = readClocks();
+    const int64_t ahead = (c.ns[kSteered] - startClocks.ns[kSteered]) - (c.ns[kMonotonic] - startClocks.ns[kMonotonic]);
+    printf(" ahead of CLOCK_MONOTONIC by %lld us", static_cast<long long>(ahead / 1000));
 #endif
     printf("\n");
     fflush(stdout);
@@ -440,7 +444,6 @@ static void report(FILE* f, const std::vector<Peer>& peers, bool markdown)
 int main(int argc, char** argv)
 {
     const int seconds = argc > 1 ? atoi(argv[1]) : 900;
-    const int firstSteered = argc > 2 ? atoi(argv[2]) : 10;
 #ifdef _WIN32
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
@@ -457,7 +460,8 @@ int main(int argc, char** argv)
             fprintf(csv, ",%s offset ns", name);
         fputc('\n', csv);
     }
-    const int64_t start = readClocks().ns[kSteady];
+    const Clocks startClocks = readClocks();
+    const int64_t start = startClocks.ns[kSteady];
     for (Peer& peer : peers)
         burst(peer, 8, start, 0);
     logRound(csv, peers, 0);
@@ -469,19 +473,15 @@ int main(int argc, char** argv)
         for (Peer& peer : peers)
             burst(peer, 3, start, round);
         logRound(csv, peers, round);
-        if (round >= firstSteered)
-        {
-            steer(peers, round);
-            compareSteered(peers, round, firstSteered, start);
-        }
+        compareSteered(peers, round, startClocks);
+        steer(peers, round, start);
     }
     std::this_thread::sleep_until(std::chrono::steady_clock::time_point(std::chrono::nanoseconds(start)) +
                                   std::chrono::seconds(seconds));
     for (Peer& peer : peers)
         burst(peer, 8, start, round);
     logRound(csv, peers, round);
-    if (round > firstSteered)
-        compareSteered(peers, round, firstSteered, start);
+    compareSteered(peers, round, startClocks);
     if (csv)
         fclose(csv);
 
