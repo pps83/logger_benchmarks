@@ -536,6 +536,11 @@ bool syncLogStopped()
     return stoppedBy != 0 && stoppedBy != logThreadId();
 }
 
+bool logdetail::syncLinesDropped()
+{
+    return syncLogStopped() || processExiting();
+}
+
 void setLogLineHook(LogLineHook hook)
 {
     gLogLineHook.store(hook, std::memory_order_release);

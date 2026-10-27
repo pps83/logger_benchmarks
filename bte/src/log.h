@@ -824,6 +824,13 @@ FORCEINLINE bool sameRecord(const unsigned char* record, uint64_t tag, F... fiel
     return previousTag == tag && (same(at, fields) && ...);
 }
 
+// The logger's end takes a thread's room, then clears its last record: a LOG that found it cleared finds no room either
+FORCEINLINE void acquireIfCleared(const unsigned char* last)
+{
+    if (last == nullptr)
+        std::atomic_thread_fence(std::memory_order_acquire);
+}
+
 // Signed, so a limit the logger's end set to the published position fails a record written after it too
 FORCEINLINE bool fits(const Writer& writer, size_t size)
 {
@@ -864,6 +871,7 @@ FORCEINLINE void commitRecord(Writer& writer, unsigned char* at, size_t size, ui
 void submitLlog(const unsigned char* record, size_t size);
 void llogText(std::string_view text);
 void llogFormatted(std::string_view format, std::format_args args);
+bool syncLinesDropped(); // in SyncLog.cpp: another thread ended the logger, or ExitProcess runs
 
 // LLOG's record, built on the stack, so LLOG neither starts nor links the async logger
 template <typename... F>
@@ -893,6 +901,9 @@ NOINLINE void logSlow(uint64_t tag, size_t size, F... fields)
         commitRecord(*tWriter, at, size, tag, fields...);
         return;
     }
+    // Dropped, so not built: at exit the CRT's heap can be gone before a detached thread's last LOG
+    if (syncLinesDropped())
+        return;
     std::vector<unsigned char> record(size);
     writeRecord(record.data(), tag, fields...);
     writeSync(record.data());
@@ -908,9 +919,10 @@ FORCEINLINE void logFields(const Site& site, F... fields)
     if (last != nullptr && sameRecord(last, tag, fields...))
     {
         // No timestamp for a repeat: the logger thread times pending counts itself (AsyncLog.cpp, writeIdleRepeats)
-        writer.repeats.store(writer.repeats.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        writer.repeats.store(writer.repeats.load(std::memory_order_relaxed) + 1, std::memory_order_release);
         return;
     }
+    acquireIfCleared(last);
     const size_t size = (kRecordHeader + ... + fieldSize(fields));
     if (!fits(writer, size)) [[unlikely]]
     {

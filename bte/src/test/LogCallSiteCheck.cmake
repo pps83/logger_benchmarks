@@ -1,6 +1,6 @@
 # cmake -DTOOL=<objdump or llvm-objdump> -DOBJECT=<LogCallSites object> [-DEXTRA_ALLOWED=<symbol>] -P <this file>
-# Fails when a logCallSite function reads the counter other than once inline, or calls or jumps anywhere but LOG's
-# cold paths, logSlow and commitAfterRepeats
+# Fails when a logCallSite function reads the counter other than once inline (none when kLogMode 0 leaves it a bare
+# return), or calls or jumps anywhere but LOG's cold paths, logSlow and commitAfterRepeats
 cmake_minimum_required(VERSION 3.28) # without it, -P runs the script with CMake's old policies and no IN_LIST
 
 macro(objdumpLines var)
@@ -56,12 +56,14 @@ foreach (line IN LISTS lines)
     checkPending()
     set(function "")
     set(tlvLoaded FALSE)
+    set(firstOp "")
     if (name MATCHES "logCallSite(Literal|Numbers)")
       set(function "${name}")
       set(base "logCallSite${CMAKE_MATCH_1}")
       if (NOT base IN_LIST found)
         list(APPEND found "${base}")
         set("reads_${base}" 0)
+        set("bareReturn_${base}" FALSE)
       endif()
     endif()
     continue()
@@ -87,6 +89,12 @@ foreach (line IN LISTS lines)
   endif()
   set(op "${CMAKE_MATCH_1}")
   set(args "${CMAKE_MATCH_2}")
+  if (firstOp STREQUAL "" AND NOT op MATCHES "^(endbr64|endbr32|bti)$")
+    set(firstOp "${op}")
+    if (op MATCHES "^ret" AND NOT function MATCHES "\\.cold")
+      set("bareReturn_${base}" TRUE)
+    endif()
+  endif()
 
   checkPending()
   if (op STREQUAL "rdtsc" OR (op STREQUAL "mrs" AND args MATCHES "(cntvct|CNTVCT)_(el0|EL0)"))
@@ -106,7 +114,7 @@ checkPending()
 foreach (base logCallSiteLiteral logCallSiteNumbers)
   if (NOT base IN_LIST found)
     list(APPEND failures "${base}: not in ${OBJECT}")
-  elseif (NOT reads_${base} EQUAL 1)
+  elseif (NOT reads_${base} EQUAL 1 AND NOT (reads_${base} EQUAL 0 AND bareReturn_${base}))
     list(APPEND failures "${base}: ${reads_${base}} counter reads, not one")
   endif()
 endforeach()

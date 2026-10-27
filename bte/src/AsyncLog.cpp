@@ -528,8 +528,8 @@ std::vector<EndCount> closeQueues()
         // The room first: a LOG finding no last record to repeat finds no room either
         thread->writer.limit.store(thread->writer.published->load(), std::memory_order_relaxed);
         // The count before the record: a thread holding a count replaces the record only under gQueuesLock
-        const uint64_t repeats = thread->writer.repeats.load(std::memory_order_relaxed);
-        const unsigned char* last = thread->writer.last.exchange(nullptr, std::memory_order_relaxed);
+        const uint64_t repeats = thread->writer.repeats.load(std::memory_order_acquire);
+        const unsigned char* last = thread->writer.last.exchange(nullptr, std::memory_order_release);
         if (repeats != thread->writtenRepeats)
             counts.push_back({repeatsLine(*thread, repeats, last, now), thread->threadId, thread->threadName});
     }
@@ -545,8 +545,8 @@ void writeCounts(std::vector<EndCount>& counts)
         writeLogLine(count.line, ticksToTime(timeTicks()), count.threadId, count.threadName, false);
 }
 
-// Under gQueuesLock at the logger's end: the threads still listed should have ended before it
-void reportThreadsHoldingQueues()
+// Under gQueuesLock as the logger ends, before a thread logging after the end gives up its queue and its place here
+std::string threadsHoldingQueues()
 {
     std::string threads;
     for (ThreadQueue* thread = gThreadQueues; thread != nullptr; thread = thread->next)
@@ -557,6 +557,12 @@ void reportThreadsHoldingQueues()
         if (thread->threadName[0] != '\0')
             fmtStrAppend(threads, " %s", thread->threadName);
     }
+    return threads;
+}
+
+// The threads still holding a queue at the logger's end should have ended before it
+void reportThreadsHoldingQueues(const std::string& threads)
+{
     if (threads.empty())
         return;
     std::string line(kLogPrefixSize, ' ');
@@ -566,17 +572,20 @@ void reportThreadsHoldingQueues()
     writeLogLine(line, ticksToTime(timeTicks()), logThreadId(), name, false);
 }
 
-// The record's own time where it holds bte's clock, else now
+// The record's own time: where its counter is not bte's clock, now less the record's age at Quill's rate
 double recordTime(const unsigned char* record)
 {
+    uint64_t recorded;
+    memcpy(&recorded, record, sizeof(recorded));
     if constexpr (kRawTimestamps)
-    {
-        uint64_t timestamp;
-        memcpy(&timestamp, record, sizeof(timestamp));
-        return epochSeconds(timestamp);
-    }
+        return epochSeconds(recorded);
     else
-        return ticksToTime(timeTicks());
+    {
+        // The rate first: Quill measures it at its first use, which takes 30 to 150 ms on an Intel Mac
+        const double nsPerTick = quill::detail::RdtscClock::RdtscTicks::instance().ns_per_tick();
+        const auto age = static_cast<int64_t>(logdetail::timestamp() - recorded);
+        return ticksToTime(timeTicks()) - static_cast<double>(age) * nsPerTick / 1e9;
+    }
 }
 
 // On the thread itself, before the logger thread reads: unread records with their own time and name
@@ -775,7 +784,8 @@ void writeIdleRepeats()
         ThreadQueue* const first = gLoggerEnded.load(std::memory_order_relaxed) ? nullptr : gThreadQueues;
         for (ThreadQueue* thread = first; thread != nullptr; thread = thread->next)
         {
-            const uint64_t repeats = thread->writer.repeats.load(std::memory_order_relaxed);
+            // Acquired, as LOG releases it: the repeated record and its place in the queue are seen with the count
+            const uint64_t repeats = thread->writer.repeats.load(std::memory_order_acquire);
             if (repeats == thread->writtenRepeats)
             {
                 thread->pendingSince = 0;
@@ -923,9 +933,10 @@ void queueLlogRecord(const unsigned char* record, size_t size)
     if (last != nullptr && recordSize(current, *tThreadQueue, last) == size &&
         memcmp(last + sizeof(uint64_t), record + sizeof(uint64_t), tagged) == 0)
     {
-        current.repeats.store(current.repeats.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+        current.repeats.store(current.repeats.load(std::memory_order_relaxed) + 1, std::memory_order_release);
         return;
     }
+    logdetail::acquireIfCleared(last);
     unsigned char* at = logdetail::fits(current, size) ? current.storage + (current.position & current.mask)
                                                         : logdetail::reserve(size);
     if (at == nullptr)
@@ -1001,9 +1012,11 @@ public:
         }
         logTransition(LogTransition::AsyncEndWaited);
         std::vector<EndCount> counts;
+        std::string holding;
         {
             QueuesLock lock;
             counts = closeQueues();
+            holding = threadsHoldingQueues();
             // Null after a failed start, which installed none of these
             if (gLogger.exchange(nullptr) != nullptr)
             {
@@ -1021,8 +1034,7 @@ public:
         }
         logTransition(LogTransition::AsyncEnded);
         writeCounts(counts);
-        QueuesLock lock;
-        reportThreadsHoldingQueues();
+        reportThreadsHoldingQueues(holding);
         flushSyncLog();
     }
 
@@ -1200,7 +1212,7 @@ void logdetail::commitAfterRepeats(unsigned char* record, size_t size)
 
 void logdetail::writeSync(const unsigned char* record)
 {
-    if (syncLogStopped() || processExiting())
+    if (syncLinesDropped())
         return;
     const long long logTime = timeTicks(); // not the end of the wait below
     writeSyncRepeats(true);

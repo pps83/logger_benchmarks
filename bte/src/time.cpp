@@ -126,6 +126,7 @@ long long debug_qpcEpochBase()
 // the goal of the function is to align values returned by qpc with values returned by ft.
 // This way, timeSec will return values very close to values returned by std::time.
 // TimeAlignment unit test verifies that this is withing 5 ms.
+// TODO: re-anchor at run time at NTP's rate (adjtimex on Linux): the counter's nominal rate is ~15 ppm off real time
 static long long NOINLINE calcQpcEpochBase(long long& qpcBase)
 {
     setFreq();
