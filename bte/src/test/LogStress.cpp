@@ -535,6 +535,20 @@ enum class CrashLine { None, Log, Llog };
 
 Crash gCrash = Crash::None; // the run's own, crashOf's draw for Drawn
 
+// On the child's stderr just before its planned crash: a run whose log may be lost proves by it that it got there
+constexpr char kCrashMark[] = "log_stress: the planned crash\n";
+
+// Straight to the handle, with no buffer or lock: the crash comes under the logger's locks and the runtime's too
+void markCrash()
+{
+#ifdef _WIN32
+    DWORD written = 0;
+    WriteFile(GetStdHandle(STD_ERROR_HANDLE), kCrashMark, sizeof(kCrashMark) - 1, &written, nullptr);
+#else
+    [[maybe_unused]] const ssize_t written = write(STDERR_FILENO, kCrashMark, sizeof(kCrashMark) - 1);
+#endif
+}
+
 void crash(Crash how, CrashLine line)
 {
     // The log must hold it where it can, so a failure before the planned crash does not pass for it
@@ -542,6 +556,7 @@ void crash(Crash how, CrashLine line)
         LOG("stress crash");
     else if (line == CrashLine::Llog)
         LLOG("stress crash");
+    markCrash();
     switch (how)
     {
     case Crash::Fault:
@@ -1615,7 +1630,14 @@ std::string crashProblem(const Scenario& scenario, uint64_t seed, long long code
     const Crash crash = crashOf(scenario, seed);
     if (!plannedEnd(crash, code, errors))
         return endText(code) + ", not as the planned crash";
-    if (const std::string unplanned = unplannedOutput(errors, crash); !unplanned.empty())
+    const size_t mark = errors.find(kCrashMark);
+    if (mark == std::string::npos)
+        return endText(code) + " before the planned crash: no mark on stderr";
+    if (errors.find(kCrashMark, mark + 1) != std::string::npos)
+        return "the planned crash's mark twice on stderr";
+    std::string rest = errors;
+    rest.erase(mark, sizeof(kCrashMark) - 1);
+    if (const std::string unplanned = unplannedOutput(rest, crash); !unplanned.empty())
         return "wrote to stderr: " + unplanned;
     return checkLog(scenario, seed, readText(logFile));
 }
