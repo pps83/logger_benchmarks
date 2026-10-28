@@ -228,6 +228,9 @@ void unsetCrashHooks()
 
 void logdetail::logFormatted(std::string_view format, std::format_args args)
 {
+    // Dropped, so not formatted: at exit the CRT's heap can be gone before a detached thread's last LOG
+    if (syncLinesDropped())
+        return;
     std::string text;
     formatFmt(text, format, args);
     submitText(text);

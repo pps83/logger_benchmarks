@@ -14,6 +14,7 @@
 #include <string.h>
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <charconv>
 #include <chrono>
 #include <filesystem>
@@ -26,7 +27,6 @@
 #include <unordered_map>
 #include <vector>
 #ifdef _WIN32
-#include "GetProcAddr.h"
 #include <windows.h>
 #include <dbghelp.h>
 #else
@@ -51,11 +51,17 @@ struct LineNumber
     int value;
 };
 
+// A worker released after the logger's end, whose lines the logger ignores without formatting them
+static thread_local bool tIgnored = false;
+
 template <>
 struct std::formatter<LineNumber> : std::formatter<int>
 {
     auto format(const LineNumber& number, std::format_context& context) const
     {
+        // Anything on stderr fails the run
+        if (tIgnored)
+            fputs("an ignored LOG formatted its line\n", stderr);
         return std::formatter<int>::format(number.value, context);
     }
 };
@@ -66,34 +72,178 @@ namespace
 // What the child's main thread does around the transition, and with it what the log must hold
 enum class Phase { Open, Start, End, Teardown, Crash };
 
-enum class Crash { None, Fault, Abort, Throw };
+// Where the scenario acts: at one of the logger's transitions, or at a point of the exit the child marks itself
+enum class Point
+{
+    SyncLogOpen,
+    AsyncStart,
+    AsyncRunning,
+    AsyncPublished,
+    AsyncFirstRead,
+    Main,             // in main, while the workers log
+    ExitStart,        // a static object's destructor, before DestructionManager's objects
+    DestructionAbove, // a DestructionManager object above the logger's level
+    AsyncEnd,
+    AsyncEndWaited,
+    AsyncEnded,
+    DestructionBelow, // one below it, after the logger's end
+    SyncLogClose,
+    SyncLogClosed,
+    AfterClose,       // one below SyncLog's level, after the log file closed
+};
+
+// Drawn, for each run: a fault, an abort, or a throw on a worker and a std::terminate on the thread at the point
+enum class Crash { None, Fault, Abort, Throw, Terminate, Drawn };
 
 struct Scenario
 {
     const char* name;
     Phase phase;
-    LogTransition releaseAt; // Teardown and Crash release the workers themselves
-    Crash crash = Crash::None;
-    bool onWorker = false; // a worker crashes, not the main thread
+    Point releaseAt; // Teardown and Crash release the workers themselves
+    Crash crash = Crash::None; // at the point, on the thread making it or on a worker
+    bool onWorker = false;
+    bool abandon = false; // the workers are never stopped: they log on through the exit, every kind of statement
 };
 
 constexpr Scenario kScenarios[] = {
-    {"SyncLogOpen", Phase::Open, LogTransition::SyncLogOpen},
-    {"AsyncStart", Phase::Start, LogTransition::AsyncStart},
-    {"AsyncRunning", Phase::Start, LogTransition::AsyncRunning},
-    {"AsyncPublished", Phase::Start, LogTransition::AsyncPublished},
-    {"AsyncFirstRead", Phase::Start, LogTransition::AsyncFirstRead},
-    {"Teardown", Phase::Teardown, LogTransition::AsyncEnd},
-    {"AsyncEnd", Phase::End, LogTransition::AsyncEnd},
-    {"AsyncEndWaited", Phase::End, LogTransition::AsyncEndWaited},
-    {"AsyncEnded", Phase::End, LogTransition::AsyncEnded},
-    {"CrashMainFault", Phase::Crash, LogTransition::AsyncEnd, Crash::Fault},
-    {"CrashMainAbort", Phase::Crash, LogTransition::AsyncEnd, Crash::Abort},
-    {"CrashMainThrow", Phase::Crash, LogTransition::AsyncEnd, Crash::Throw},
-    {"CrashWorkerFault", Phase::Crash, LogTransition::AsyncEnd, Crash::Fault, true},
-    {"CrashWorkerAbort", Phase::Crash, LogTransition::AsyncEnd, Crash::Abort, true},
-    {"CrashWorkerThrow", Phase::Crash, LogTransition::AsyncEnd, Crash::Throw, true},
+    {"SyncLogOpen", Phase::Open, Point::SyncLogOpen},
+    {"AsyncStart", Phase::Start, Point::AsyncStart},
+    {"AsyncRunning", Phase::Start, Point::AsyncRunning},
+    {"AsyncPublished", Phase::Start, Point::AsyncPublished},
+    {"AsyncFirstRead", Phase::Start, Point::AsyncFirstRead},
+    {"Teardown", Phase::Teardown, Point::AsyncEnd},
+    {"ExitStart", Phase::End, Point::ExitStart},
+    {"DestructionAbove", Phase::End, Point::DestructionAbove},
+    {"AsyncEnd", Phase::End, Point::AsyncEnd},
+    {"AsyncEndWaited", Phase::End, Point::AsyncEndWaited},
+    {"AsyncEnded", Phase::End, Point::AsyncEnded},
+    {"DestructionBelow", Phase::End, Point::DestructionBelow},
+    {"Abandoned", Phase::End, Point::AsyncEnd, Crash::None, false, true},
+    {"CrashMainFault", Phase::Crash, Point::Main, Crash::Fault},
+    {"CrashMainAbort", Phase::Crash, Point::Main, Crash::Abort},
+    {"CrashMainThrow", Phase::Crash, Point::Main, Crash::Throw},
+    {"CrashWorkerFault", Phase::Crash, Point::Main, Crash::Fault, true},
+    {"CrashWorkerAbort", Phase::Crash, Point::Main, Crash::Abort, true},
+    {"CrashWorkerThrow", Phase::Crash, Point::Main, Crash::Throw, true},
+    {"CrashAtSyncLogOpen", Phase::Open, Point::SyncLogOpen, Crash::Drawn},
+    {"CrashAtAsyncStart", Phase::Start, Point::AsyncStart, Crash::Drawn},
+    {"CrashAtAsyncRunning", Phase::Start, Point::AsyncRunning, Crash::Drawn},
+    {"CrashAtAsyncPublished", Phase::Start, Point::AsyncPublished, Crash::Drawn},
+    {"CrashAtAsyncFirstRead", Phase::Start, Point::AsyncFirstRead, Crash::Drawn},
+    {"CrashAtExitStart", Phase::End, Point::ExitStart, Crash::Drawn},
+    {"CrashAtDestructionAbove", Phase::End, Point::DestructionAbove, Crash::Drawn},
+    {"CrashAtAsyncEnd", Phase::End, Point::AsyncEnd, Crash::Drawn},
+    {"CrashAtAsyncEndWaited", Phase::End, Point::AsyncEndWaited, Crash::Drawn},
+    {"CrashAtAsyncEnded", Phase::End, Point::AsyncEnded, Crash::Drawn},
+    {"CrashAtDestructionBelow", Phase::End, Point::DestructionBelow, Crash::Drawn},
+    {"CrashAtSyncLogClose", Phase::End, Point::SyncLogClose, Crash::Drawn},
+    {"CrashAtSyncLogClosed", Phase::End, Point::SyncLogClosed, Crash::Drawn},
+    {"CrashAtAfterClose", Phase::End, Point::AfterClose, Crash::Drawn},
+    {"WorkerCrashAtSyncLogOpen", Phase::Open, Point::SyncLogOpen, Crash::Drawn, true},
+    {"WorkerCrashAtAsyncStart", Phase::Start, Point::AsyncStart, Crash::Drawn, true},
+    {"WorkerCrashAtAsyncRunning", Phase::Start, Point::AsyncRunning, Crash::Drawn, true},
+    {"WorkerCrashAtAsyncPublished", Phase::Start, Point::AsyncPublished, Crash::Drawn, true},
+    {"WorkerCrashAtAsyncFirstRead", Phase::Start, Point::AsyncFirstRead, Crash::Drawn, true},
+    {"WorkerCrashAtExitStart", Phase::End, Point::ExitStart, Crash::Drawn, true},
+    {"WorkerCrashAtDestructionAbove", Phase::End, Point::DestructionAbove, Crash::Drawn, true},
+    {"WorkerCrashAtAsyncEnd", Phase::End, Point::AsyncEnd, Crash::Drawn, true},
+    {"WorkerCrashAtAsyncEndWaited", Phase::End, Point::AsyncEndWaited, Crash::Drawn, true},
+    {"WorkerCrashAtAsyncEnded", Phase::End, Point::AsyncEnded, Crash::Drawn, true},
+    {"WorkerCrashAtDestructionBelow", Phase::End, Point::DestructionBelow, Crash::Drawn, true},
 };
+
+bool crashes(const Scenario& scenario)
+{
+    return scenario.crash != Crash::None;
+}
+
+// From the async logger's end on, other threads' LOGs are ignored: a worker released there logs nothing more
+bool pastTheEnd(Point point)
+{
+    return point >= Point::AsyncEnded;
+}
+
+// The run's crash: a Drawn one comes from the seed, the same in the child and in the parent checking its log
+Crash crashOf(const Scenario& scenario, uint64_t seed)
+{
+    if (scenario.crash != Crash::Drawn)
+        return scenario.crash;
+    // A worker's abort without the log's handlers is the C runtime's alone: MSVC Debug's runs the exit as others go on
+    if (scenario.onWorker && (scenario.phase != Phase::End || pastTheEnd(scenario.releaseAt)))
+        return Crash::Fault;
+    rand_default_t random;
+    srand64_r(random, seed ^ 0x5bd1e9955bd1e995ull);
+    const Crash kinds[] = {Crash::Fault, Crash::Abort, scenario.onWorker ? Crash::Throw : Crash::Terminate};
+    return kinds[rand64_r(random) % std::size(kinds)];
+}
+
+// The logger runs that point under its own locks, or on its own thread: the crash there logs nothing first
+bool pointLogs(Point point)
+{
+    switch (point)
+    {
+    case Point::SyncLogOpen:
+    case Point::AsyncStart:
+    case Point::AsyncRunning:
+    case Point::AsyncPublished:
+    case Point::AsyncFirstRead:
+        return false;
+    case Point::Main:
+    case Point::ExitStart:
+    case Point::DestructionAbove:
+    case Point::AsyncEnd:
+    case Point::AsyncEndWaited:
+    case Point::AsyncEnded:
+    case Point::DestructionBelow:
+    case Point::SyncLogClose:
+    case Point::SyncLogClosed:
+    case Point::AfterClose:
+        return true;
+    }
+    return true;
+}
+
+// The points after JoinsWorkers' level, which stops the workers first
+bool afterTheWorkers(Point point)
+{
+    return point >= Point::SyncLogClose;
+}
+
+// Whether a crash there keeps every earlier line: the crash hooks run with the async logger, the close puts all on disk
+bool crashKeepsLines(const Scenario& scenario)
+{
+    switch (scenario.releaseAt)
+    {
+    case Point::Main:
+    case Point::ExitStart:
+    case Point::DestructionAbove:
+    case Point::AsyncEnd:
+    case Point::AsyncEndWaited:
+    case Point::SyncLogClosed:
+    case Point::AfterClose:
+        return true;
+    case Point::SyncLogOpen:
+    case Point::AsyncStart:
+    case Point::AsyncRunning:
+    case Point::AsyncPublished:
+    case Point::AsyncFirstRead:
+    case Point::AsyncEnded:
+    case Point::DestructionBelow:
+    case Point::SyncLogClose:
+        return false;
+    }
+    return false;
+}
+
+// The "stress crash" lines a crash keeping its lines leaves: none where it logs nothing first, nor after the close
+int keptCrashLines(const Scenario& scenario)
+{
+    if (!pointLogs(scenario.releaseAt))
+        return 0;
+    if (scenario.releaseAt == Point::SyncLogClosed || scenario.releaseAt == Point::AfterClose)
+        return 0;
+    return 1;
+}
 
 const Scenario* findScenario(std::string_view name)
 {
@@ -147,15 +297,18 @@ struct MainLines
     int joined;
 };
 
-MainLines mainLines(Phase phase)
+MainLines mainLines(const Scenario& scenario)
 {
-    switch (phase)
+    switch (scenario.phase)
     {
     case Phase::Open:
         return {0, 0, 0, 0};
     case Phase::Start:
         return {2, 2, 4, 0};
     case Phase::End:
+        // Abandoned workers have no JoinsWorkers to log its pair and "joined"
+        if (scenario.abandon)
+            return {2, 2, 4, 0};
         // Where the runtime ran the main thread's thread_local destructors before the teardown, LLOG counts no repeats
         return {3, 4, 6, 1};
     case Phase::Teardown:
@@ -164,6 +317,21 @@ MainLines mainLines(Phase phase)
         return {2, 2, 4, 0};
     }
     return {};
+}
+
+// The lines PointMarker logs at the exit's start, above the logger, below it and after the close
+struct MarkedLines
+{
+    int exitStart;
+    int above;
+    int below;
+    int afterClose;
+};
+
+// The exiting thread logs until the close, synchronously after the logger's end, and nothing after it
+MarkedLines markedLines(const Scenario& scenario)
+{
+    return scenario.phase == Phase::End ? MarkedLines {1, 1, 1, 0} : MarkedLines {0, 0, 0, 0};
 }
 
 const Scenario* gScenario = nullptr;
@@ -322,7 +490,7 @@ void logIteration(int worker, int number, const Iteration& iteration, int& helpe
     if (iteration.helper)
     {
         // Once a crash scenario releases its workers, a thread started as the crash ends the process fails under MinGW
-        if (gScenario->phase == Phase::Crash && gReleased.load())
+        if (crashes(*gScenario) && gReleased.load())
             ++helpers;
         else
             std::thread(logHelper, worker, helpers++, iteration.llog).join();
@@ -336,10 +504,18 @@ void logIteration(int worker, int number, const Iteration& iteration, int& helpe
 // Somewhere in the first page, never mapped, picked at run time: icx removed a write through a null it could see
 volatile int* volatile gNowhere = nullptr;
 
-void crash(Crash how)
+// Where the crash logs its line first: LLOG in the scenarios before the async logger, none under the logger's locks
+enum class CrashLine { None, Log, Llog };
+
+Crash gCrash = Crash::None; // the run's own, crashOf's draw for Drawn
+
+void crash(Crash how, CrashLine line)
 {
-    // The log must hold it, so a failure before the planned crash does not pass for it
-    LOG("stress crash");
+    // The log must hold it where it can, so a failure before the planned crash does not pass for it
+    if (line == CrashLine::Log)
+        LOG("stress crash");
+    else if (line == CrashLine::Llog)
+        LLOG("stress crash");
     switch (how)
     {
     case Crash::Fault:
@@ -349,8 +525,63 @@ void crash(Crash how)
         abort();
     case Crash::Throw:
         throw std::runtime_error("log_stress crash");
+    case Crash::Terminate:
+        std::terminate();
     case Crash::None:
+    case Crash::Drawn:
         break;
+    }
+}
+
+char gTailPadding[20000]; // no destructor: abandoned workers read it until the process ends
+
+// An abandoned worker logs every kind of statement until the process ends it, allocating nothing itself
+[[noreturn]] void logTail(int worker, rand_default_t& random)
+{
+    const std::string_view text = "text";
+    for (int number = 0;; ++number)
+    {
+        const Iteration iteration = drawIteration(random, false);
+        const std::string_view padding(gTailPadding, static_cast<size_t>(iteration.padding));
+        switch (iteration.kind)
+        {
+        case Kind::Printf:
+            if (iteration.llog)
+                LLOG("stress %d tail %d", worker, number);
+            else
+                LOG("stress %d tail %d", worker, number);
+            break;
+        case Kind::Format:
+            if (iteration.llog)
+                LLOG("stress {} tail {}", worker, number);
+            else
+                LOG("stress {} tail {}", worker, number);
+            break;
+        case Kind::String:
+            if (iteration.llog)
+                LLOG("stress {} tail {}", worker, text);
+            else
+                LOG("stress {} tail {}", worker, text);
+            break;
+        case Kind::CString:
+            if (iteration.llog)
+                LLOG("stress %d tail %s", worker, text.data());
+            else
+                LOG("stress %d tail %s", worker, text.data());
+            break;
+        case Kind::Custom:
+            if (iteration.llog)
+                LLOG("stress {} tail {}", worker, LineNumber {number});
+            else
+                LOG("stress {} tail {}", worker, LineNumber {number});
+            break;
+        case Kind::Long:
+            if (iteration.llog)
+                LLOG("stress {} tail {} {}", worker, number, padding);
+            else
+                LOG("stress {} tail {} {}", worker, number, padding);
+            break;
+        }
     }
 }
 
@@ -367,10 +598,13 @@ void work(int worker)
     gWaiting.fetch_add(1);
     while (!gReleased.load())
         std::this_thread::yield();
+    tIgnored = gScenario->phase == Phase::End && pastTheEnd(gScenario->releaseAt);
+    if (gScenario->abandon)
+        logTail(worker, random);
     for (int done = 0; done < plan.after && !gStopped.load(); ++done)
     {
         if (gScenario->onWorker && worker == kCrashingWorker && done == gCrashAt)
-            crash(gScenario->crash);
+            crash(gCrash, plan.llogAfter ? CrashLine::Llog : CrashLine::Log);
         logIteration(worker, number++, drawIteration(random, plan.llogAfter), helpers);
     }
     while (plan.stays && !gStopped.load())
@@ -401,10 +635,60 @@ void releaseWorkers()
         continue;
 }
 
+[[noreturn]] void waitForTheCrash()
+{
+    while (true)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+}
+
+// The scenario's part at its point: the thread there crashes, or the workers go, the crashing one first among them
+void atPoint(Point point)
+{
+    if (point != gScenario->releaseAt)
+        return;
+    if (crashes(*gScenario) && !gScenario->onWorker)
+        crash(gCrash, pointLogs(point) ? CrashLine::Log : CrashLine::None);
+    releaseWorkers();
+    // The exit holds none of the logger's locks at its points, so it stays there until the worker's crash ends it
+    if (gScenario->onWorker && gScenario->phase == Phase::End)
+        waitForTheCrash();
+}
+
+// SyncLogLocking, POSIX's alone, is no scenario's point
+Point pointOf(LogTransition transition)
+{
+    switch (transition)
+    {
+    case LogTransition::SyncLogOpen:
+        return Point::SyncLogOpen;
+    case LogTransition::AsyncStart:
+        return Point::AsyncStart;
+    case LogTransition::AsyncRunning:
+        return Point::AsyncRunning;
+    case LogTransition::AsyncPublished:
+        return Point::AsyncPublished;
+    case LogTransition::AsyncFirstRead:
+        return Point::AsyncFirstRead;
+    case LogTransition::AsyncEnd:
+        return Point::AsyncEnd;
+    case LogTransition::AsyncEndWaited:
+        return Point::AsyncEndWaited;
+    case LogTransition::AsyncEnded:
+        return Point::AsyncEnded;
+    case LogTransition::SyncLogClose:
+        return Point::SyncLogClose;
+    case LogTransition::SyncLogClosed:
+        return Point::SyncLogClosed;
+    case LogTransition::SyncLogLocking:
+        break;
+    }
+    return Point::Main;
+}
+
 void onTransition(LogTransition transition)
 {
-    if (transition == gScenario->releaseAt)
-        releaseWorkers();
+    if (transition != LogTransition::SyncLogLocking)
+        atPoint(pointOf(transition));
 }
 
 // Anything on stderr fails the run
@@ -438,7 +722,11 @@ struct JoinsWorkers
 
     ~JoinsWorkers()
     {
-        releaseUnlessReleased();
+        // A point after this level is the exiting thread's alone
+        if (afterTheWorkers(gScenario->releaseAt))
+            releaseWorkers();
+        else
+            releaseUnlessReleased();
         gStopped.store(true);
         joinWorkers(workers);
         logMainAgain();
@@ -463,7 +751,7 @@ void runStart(Phase phase)
         logMainAgain();
     }
     // The logger thread makes that transition on its own, soon after the start
-    while (gScenario->releaseAt == LogTransition::AsyncFirstRead && !gReleased.load())
+    while (gScenario->releaseAt == Point::AsyncFirstRead && !gReleased.load())
         std::this_thread::yield();
     releaseUnlessReleased();
     joinWorkers(workers);
@@ -483,16 +771,56 @@ void logMainLines(Phase phase, void (*lines)())
         lines();
 }
 
-// The transition comes in the teardown, the workers logging through it until JoinsWorkers stops them
-void runEnd(Phase phase)
+// Logs at its point of the exit, then does the scenario's part there
+struct PointMarker
 {
+    Point point;
+    const char* text;
+
+    PointMarker(Point at, const char* line)
+        : point(at)
+        , text(line)
+    {
+    }
+
+    ~PointMarker()
+    {
+        LOG("{}", text);
+        atPoint(point);
+    }
+};
+
+// The exit's points End marks: a static gone before DestructionManager, above the logger, below it, after the close
+void markExitPoints()
+{
+    static PointMarker exitStart(Point::ExitStart, "stress at the exit's start");
+    DestructionManager::make_shared<PointMarker>(50, Point::DestructionAbove, "stress above the logger");
+    DestructionManager::make_shared<PointMarker>(7, Point::DestructionBelow, "stress below the logger");
+    DestructionManager::make_shared<PointMarker>(0, Point::AfterClose, "stress after the close");
+}
+
+// The transition comes in the teardown, the workers logging through it until JoinsWorkers stops them, or for good
+void runEnd(const Scenario& scenario)
+{
+    const Phase phase = scenario.phase;
     logMainLines(phase, logMainAgain);
     // The async logger runs before the workers log, so it ends holding their queues and counts
     logMainLines(phase, logMainFirst);
     if (phase == Phase::Teardown)
         DestructionManager::make_shared<ReleasesWorkers>(50);
-    JoinsWorkers* joiner = DestructionManager::make_shared<JoinsWorkers>(5).get();
-    startWorkers(joiner->workers);
+    if (scenario.abandon)
+    {
+        memset(gTailPadding, 't', sizeof(gTailPadding));
+        std::vector<std::thread> workers;
+        startWorkers(workers);
+        for (std::thread& worker : workers)
+            worker.detach();
+    }
+    else
+    {
+        JoinsWorkers* joiner = DestructionManager::make_shared<JoinsWorkers>(5).get();
+        startWorkers(joiner->workers);
+    }
     logMainLines(phase, logMainAgain);
     if (phase == Phase::Teardown)
         DestructionManager::destroyNow();
@@ -508,7 +836,7 @@ void runCrash(const Scenario& scenario)
     logMainAgain();
     releaseWorkers();
     if (!scenario.onWorker)
-        crash(scenario.crash);
+        crash(gCrash, CrashLine::Log);
     joinWorkers(workers);
 }
 
@@ -549,9 +877,12 @@ struct LeakCheck
 
 int runChild(const Scenario& scenario, uint64_t seed, const char* logFile)
 {
+    // Before the leak check's start, as they outlive its level
+    if (scenario.phase == Phase::End)
+        markExitPoints();
 #if HAVE_LEAKFINDER
-    // A crash leaves the heap as it was
-    if (scenario.phase != Phase::Crash)
+    // A crash leaves the heap as it was, and abandoned workers hold theirs
+    if (!crashes(scenario) && !scenario.abandon)
     {
         const std::shared_ptr<LeakCheck> check = DestructionManager::make_shared<LeakCheck>(3);
         check->since = DebugTools::leakfinder_snapshot();
@@ -566,7 +897,11 @@ int runChild(const Scenario& scenario, uint64_t seed, const char* logFile)
     srand64_r(random, seed);
     gPause = std::chrono::microseconds(kPausesUs[rand64_r(random) % std::size(kPausesUs)]);
     gCrashAt = static_cast<int>(rand64_r(random) % workerPlan(Phase::Crash, kCrashingWorker).after);
+    // A worker crashing at a point does it as it is released there
+    if (scenario.phase != Phase::Crash)
+        gCrashAt = 0;
     gNowhere = reinterpret_cast<volatile int*>(static_cast<uintptr_t>(rand64_r(random) % 4096) & ~uintptr_t(3));
+    gCrash = crashOf(scenario, seed);
     gScenario = &scenario;
     gSeed = seed;
     if (scenario.phase != Phase::Teardown && scenario.phase != Phase::Crash)
@@ -576,7 +911,7 @@ int runChild(const Scenario& scenario, uint64_t seed, const char* logFile)
     else if (scenario.phase == Phase::Crash)
         runCrash(scenario);
     else
-        runEnd(scenario.phase);
+        runEnd(scenario);
     return 0;
 }
 
@@ -632,9 +967,11 @@ using WriteDump = BOOL(WINAPI*)(HANDLE, DWORD, HANDLE, MINIDUMP_TYPE, PMINIDUMP_
 // The hung child's threads and memory, for a debugger later
 void writeDump(HANDLE process, DWORD pid, const fs::path& dumpFile)
 {
-    WriteDump write = nullptr;
     HMODULE dbghelp = LoadLibraryW(L"dbghelp.dll");
-    if (dbghelp == nullptr || !GetProcAddr(dbghelp, "MiniDumpWriteDump", write))
+    if (dbghelp == nullptr)
+        return;
+    const WriteDump write = std::bit_cast<WriteDump>(GetProcAddress(dbghelp, "MiniDumpWriteDump"));
+    if (write == nullptr)
         return;
     HANDLE file = CreateFileW(dumpFile.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
     if (file == INVALID_HANDLE_VALUE)
@@ -888,6 +1225,8 @@ struct LogContent
     int joined = 0;
     int crashes = 0;
     int runStarts = 0;
+    MarkedLines marked {};
+    bool tails = false; // abandoned workers' tail lines are allowed
 };
 
 const char* readHelperLine(std::string_view text, bool counted, WorkerLog& lines)
@@ -914,6 +1253,9 @@ const char* readWorkerLine(std::string_view text, bool counted, int count, const
             return "an unexpected line";
         if (skip(rest, " helper "))
             return readHelperLine(rest, counted, log.workers[worker]);
+        // An abandoned worker's line after its release, unchecked: the process ends it anywhere
+        if (log.tails && rest.starts_with(" tail "))
+            return nullptr;
         if (!rest.starts_with(" line "))
             return "an unexpected line";
     }
@@ -989,6 +1331,26 @@ const char* readMessage(const LogLine& line, LogContent& log)
         ++log.crashes;
         return nullptr;
     }
+    if (text == "stress at the exit's start")
+    {
+        ++log.marked.exitStart;
+        return nullptr;
+    }
+    if (text == "stress above the logger")
+    {
+        ++log.marked.above;
+        return nullptr;
+    }
+    if (text == "stress below the logger")
+    {
+        ++log.marked.below;
+        return nullptr;
+    }
+    if (text == "stress after the close")
+    {
+        ++log.marked.afterClose;
+        return nullptr;
+    }
     if (text.starts_with("threads still holding a log queue at the logger's end: "))
         return nullptr;
     if (text.starts_with("==== log start, pid "))
@@ -1001,9 +1363,27 @@ const char* readMessage(const LogLine& line, LogContent& log)
     return readWorkerLine(text, counted, count, line, log);
 }
 
+// A crash that loses lines: whatever the log holds is in order, any count of each line up to the planned one
+std::string checkCut(const Scenario& scenario, const LogContent& log)
+{
+    const MainLines main = mainLines(scenario);
+    const MarkedLines marked = markedLines(scenario);
+    if (log.runStarts > 1 || log.mainFirst > 1 || log.crashes > 1 || log.mainAgainTotal > main.againTotal ||
+        log.joined > main.joined || log.marked.exitStart > marked.exitStart || log.marked.above > marked.above ||
+        log.marked.below > marked.below || log.marked.afterClose > marked.afterClose)
+    {
+        return fmtStr("more lines than planned: %d \"log start\", %d \"main first\", %d \"stress crash\", %d \"main "
+                      "again\", %d \"joined\", %d, %d, %d and %d at the exit's points",
+                      log.runStarts, log.mainFirst, log.crashes, log.mainAgainTotal, log.joined, log.marked.exitStart,
+                      log.marked.above, log.marked.below, log.marked.afterClose);
+    }
+    return {};
+}
+
 std::string checkLog(const Scenario& scenario, uint64_t seed, const std::string& text)
 {
     LogContent log;
+    log.tails = scenario.abandon;
     for (int worker = 0; worker < kWorkers; ++worker)
         log.workers.push_back(planWorker(scenario.phase, seed, worker));
     size_t number = 0;
@@ -1011,7 +1391,7 @@ std::string checkLog(const Scenario& scenario, uint64_t seed, const std::string&
     {
         const size_t end = text.find('\n', begin);
         // A crash can end the process while another thread is writing
-        if (end == std::string::npos && scenario.phase == Phase::Crash)
+        if (end == std::string::npos && crashes(scenario))
             break;
         if (end == std::string::npos)
             return "the log's last line has no end";
@@ -1023,35 +1403,64 @@ std::string checkLog(const Scenario& scenario, uint64_t seed, const std::string&
         }
         begin = end + 1;
     }
+    if (crashes(scenario) && !crashKeepsLines(scenario))
+        return checkCut(scenario, log);
     if (log.runStarts != 1)
         return fmtStr("%d \"log start\" lines", log.runStarts);
     if (log.mainFirst != 1)
         return fmtStr("%d \"stress main first\" lines", log.mainFirst);
-    const MainLines expected = mainLines(scenario.phase);
-    if (log.mainAgainLines < expected.againLinesMin || log.mainAgainLines > expected.againLinesMax ||
-        log.mainAgainTotal != expected.againTotal)
+    if (crashes(scenario))
     {
-        return fmtStr("\"stress main again\": %d lines, %d with their repeats; expected %d to %d and %d",
-                      log.mainAgainLines, log.mainAgainTotal, expected.againLinesMin, expected.againLinesMax,
-                      expected.againTotal);
+        if (log.crashes != keptCrashLines(scenario))
+            return fmtStr("%d \"stress crash\" lines, expected %d", log.crashes, keptCrashLines(scenario));
+        if (const std::string problem = checkCut(scenario, log); !problem.empty())
+            return problem;
     }
-    if (log.joined != expected.joined)
-        return fmtStr("%d \"stress joined\" lines, expected %d", log.joined, expected.joined);
-    if (log.crashes != (scenario.phase == Phase::Crash ? 1 : 0))
-        return fmtStr("%d \"stress crash\" lines", log.crashes);
+    // A crash in main, or after JoinsWorkers' level, comes after all of main's lines
+    if (!crashes(scenario) || scenario.phase == Phase::Crash || afterTheWorkers(scenario.releaseAt))
+    {
+        const MainLines expected = mainLines(scenario);
+        if (log.mainAgainLines < expected.againLinesMin || log.mainAgainLines > expected.againLinesMax ||
+            log.mainAgainTotal != expected.againTotal)
+        {
+            return fmtStr("\"stress main again\": %d lines, %d with their repeats; expected %d to %d and %d",
+                          log.mainAgainLines, log.mainAgainTotal, expected.againLinesMin, expected.againLinesMax,
+                          expected.againTotal);
+        }
+        if (log.joined != expected.joined)
+            return fmtStr("%d \"stress joined\" lines, expected %d", log.joined, expected.joined);
+        if (!crashes(scenario) && log.crashes != 0)
+            return fmtStr("%d \"stress crash\" lines", log.crashes);
+        const MarkedLines marked = markedLines(scenario);
+        if (log.marked.exitStart != marked.exitStart || log.marked.above != marked.above ||
+            log.marked.below != marked.below || log.marked.afterClose != marked.afterClose)
+        {
+            return fmtStr("at the exit's start, above the logger, below it and after the close: %d, %d, %d and %d "
+                          "lines, expected %d, %d, %d and %d",
+                          log.marked.exitStart, log.marked.above, log.marked.below, log.marked.afterClose,
+                          marked.exitStart, marked.above, marked.below, marked.afterClose);
+        }
+    }
+    // Released after the logger's end, the workers' later lines are ignored, those of their helpers too
+    const bool dropped = scenario.phase == Phase::End && pastTheEnd(scenario.releaseAt);
     for (int worker = 0; worker < kWorkers; ++worker)
     {
         const bool cut = workerPlan(scenario.phase, worker).cut;
         const WorkerLog& lines = log.workers[worker];
-        if (lines.complete() < (cut ? lines.beforeRelease : lines.planned.size()))
+        if (lines.complete() < (cut ? lines.beforeRelease : lines.planned.size()) ||
+            (dropped && lines.next > lines.beforeRelease))
         {
             return fmtStr("worker %d: %zu of its %zu lines, %zu of them before the release", worker, lines.complete(),
                           lines.planned.size(), lines.beforeRelease);
         }
         for (size_t helper = 0; helper < lines.helperLines.size(); ++helper)
         {
-            if ((!cut || helper < lines.helpersBeforeRelease) && lines.helperLines[helper] != kHelperLines)
+            const bool before = helper < lines.helpersBeforeRelease;
+            if (((!cut || before) && lines.helperLines[helper] != kHelperLines) ||
+                (dropped && !before && lines.helperLines[helper] != 0))
+            {
                 return fmtStr("worker %d helper %zu: %d of its lines", worker, helper, lines.helperLines[helper]);
+            }
         }
     }
     return {};
@@ -1116,6 +1525,9 @@ bool plannedOutput(Crash crash, std::string_view line, bool sanitized)
                                   "log_stress crash";
     if (crash == Crash::Throw && uncaught)
         return true;
+    const bool terminated = line == "terminate called without an active exception" || line == "libc++abi: terminating";
+    if (crash == Crash::Terminate && terminated)
+        return true;
     if (crash != Crash::Fault && line == "abort() has been called")
         return true;
     // qemu's user-mode emulator, running another CPU's build, names the signal the planned crash ended the child with
@@ -1154,7 +1566,7 @@ bool plannedEnd(Crash crash, long long code, [[maybe_unused]] const std::string&
 #ifdef _WIN32
     if (crash == Crash::Fault)
         return code == static_cast<long long>(EXCEPTION_ACCESS_VIOLATION);
-    // Abort and a throw's terminate end in the log's SIGABRT handler, failing fast as abort does, or with abort's 3
+    // Abort, terminate and a throw's terminate end in abort: failing fast, from the log's handler or not, or with its 3
     if (code == 0xC0000409 || code == 3) // __fastfail's code
         return true;
     // On x86 an uncaught throw reaches no terminate: with no filter before the log's, SEH ends it with its own code
@@ -1174,9 +1586,10 @@ bool plannedEnd(Crash crash, long long code, [[maybe_unused]] const std::string&
 std::string crashProblem(const Scenario& scenario, uint64_t seed, long long code, const std::string& errors,
                          const fs::path& logFile)
 {
-    if (!plannedEnd(scenario.crash, code, errors))
+    const Crash crash = crashOf(scenario, seed);
+    if (!plannedEnd(crash, code, errors))
         return endText(code) + ", not as the planned crash";
-    if (const std::string unplanned = unplannedOutput(errors, scenario.crash); !unplanned.empty())
+    if (const std::string unplanned = unplannedOutput(errors, crash); !unplanned.empty())
         return "wrote to stderr: " + unplanned;
     return checkLog(scenario, seed, readText(logFile));
 }
@@ -1205,7 +1618,7 @@ bool runScenario(const fs::path& self, const Scenario& scenario, int runs)
             problem = fmtStr("did not end within %d s; its dump: %s", gHangSeconds, dumpFile.string().c_str());
         else if (code == kHung)
             problem = fmtStr("did not end within %d s; no dump was written", gHangSeconds);
-        else if (scenario.phase == Phase::Crash)
+        else if (crashes(scenario))
             problem = crashProblem(scenario, seed, code, errors, logFile);
         else if (code != 0)
             problem = endText(code);
@@ -1226,7 +1639,7 @@ bool runScenario(const fs::path& self, const Scenario& scenario, int runs)
         fs::remove(errorFile, ignored);
     }
     std::sort(times.begin(), times.end());
-    printf("%-15s %d runs, %.1f to %.1f ms, median %.1f ms\n", scenario.name, runs, times.front(), times.back(),
+    printf("%-29s %d runs, %.1f to %.1f ms, median %.1f ms\n", scenario.name, runs, times.front(), times.back(),
            times[times.size() / 2]);
     fflush(stdout);
     return true;
@@ -1244,6 +1657,16 @@ int usage()
         fprintf(stderr, " %s", scenario.name);
     fputs("\n", stderr);
     return 2;
+}
+
+// Cygwin ends a process that crashes inside exit() with exit()'s status, and the log's crash handlers write nothing
+bool runsHere([[maybe_unused]] const Scenario& scenario)
+{
+#ifdef __CYGWIN__
+    return !crashes(scenario) || scenario.phase != Phase::End;
+#else
+    return true;
+#endif
 }
 
 int runParent(int argc, char** argv)
@@ -1277,7 +1700,12 @@ int runParent(int argc, char** argv)
     if (chosen.empty())
     {
         for (const Scenario& scenario : kScenarios)
-            chosen.push_back(&scenario);
+        {
+            if (runsHere(scenario))
+                chosen.push_back(&scenario);
+        }
+        if (chosen.size() != std::size(kScenarios))
+            printf("%zu scenarios that crash inside exit() are skipped here\n", std::size(kScenarios) - chosen.size());
     }
     srand64(0);
     const fs::path self = executablePath();

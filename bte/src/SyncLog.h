@@ -54,6 +54,8 @@ enum class LogTransition
     AsyncEnd,       // the async logger's end, before anything ended
     AsyncEndWaited, // the queued lines are written; the logger hasn't ended
     AsyncEnded,     // the logger thread stopped; the threads' pending counts not yet written
+    SyncLogClose,   // DestructionManager's last object, before the log file closes
+    SyncLogClosed,  // the log file closed: from here on nothing is logged
 };
 
 // While set, it runs on the thread making each transition

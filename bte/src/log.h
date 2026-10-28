@@ -886,6 +886,9 @@ void llogFields(const Site& site, F... fields)
         submitLlog(record, size);
         return;
     }
+    // Dropped, so not built: at exit the CRT's heap can be gone before a detached thread's last LLOG
+    if (syncLinesDropped())
+        return;
     std::vector<unsigned char> record(size);
     writeRecord(record.data(), tag, fields...);
     submitLlog(record.data(), size);

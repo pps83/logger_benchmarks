@@ -503,6 +503,7 @@ void writeLogLine(std::string& line, double epochSeconds, uint32_t threadId, std
 // Every later line, on any thread, is dropped
 static void closeSyncLog()
 {
+    logTransition(LogTransition::SyncLogClose);
     // Where the runtime skips thread_local destructors at exit, the closing thread's count is still pending
     writeSyncRepeats(false);
     lockLog();
@@ -512,6 +513,7 @@ static void closeSyncLog()
     gLogClosed = true;
     unlockLog();
     fflush(stdout);
+    logTransition(LogTransition::SyncLogClosed);
 }
 
 struct SyncLogCloser
@@ -722,6 +724,9 @@ void logdetail::submitLlog(const unsigned char* record, size_t size)
         sink(record, size);
         return;
     }
+    // ExitProcess may have ended the log lock's holder where it stood
+    if (processExiting())
+        return;
     writeLlogRecord(record, size);
 }
 
@@ -732,7 +737,7 @@ void logdetail::llogText(std::string_view text)
         llogFields(kTextSite, text);
         return;
     }
-    if (syncLogStopped())
+    if (syncLinesDropped())
         return;
     writeSyncRepeats(false);
     if (void (*const flush)() = gLlogFlush.load(std::memory_order_acquire))
@@ -743,6 +748,9 @@ void logdetail::llogText(std::string_view text)
 
 void logdetail::llogFormatted(std::string_view format, std::format_args args)
 {
+    // Dropped, so not formatted: at exit the CRT's heap can be gone before a detached thread's last LLOG
+    if (syncLinesDropped())
+        return;
     std::string text;
     formatFmt(text, format, args);
     llogFields(kTextSite, std::string_view(text));
