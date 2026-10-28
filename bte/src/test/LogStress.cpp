@@ -163,13 +163,39 @@ bool pastTheEnd(Point point)
     return point >= Point::AsyncEnded;
 }
 
+// Whether the log's crash handlers are surely installed there: from the end of the async logger's start to its end
+bool handlersAt(Point point)
+{
+    switch (point)
+    {
+    case Point::Main:
+    case Point::ExitStart:
+    case Point::DestructionAbove:
+    case Point::AsyncEnd:
+    case Point::AsyncEndWaited:
+        return true;
+    case Point::SyncLogOpen:
+    case Point::AsyncStart:
+    case Point::AsyncRunning:
+    case Point::AsyncPublished:
+    case Point::AsyncFirstRead:
+    case Point::AsyncEnded:
+    case Point::DestructionBelow:
+    case Point::SyncLogClose:
+    case Point::SyncLogClosed:
+    case Point::AfterClose:
+        return false;
+    }
+    return false;
+}
+
 // The run's crash: a Drawn one comes from the seed, the same in the child and in the parent checking its log
 Crash crashOf(const Scenario& scenario, uint64_t seed)
 {
     if (scenario.crash != Crash::Drawn)
         return scenario.crash;
-    // A worker's abort without the log's handlers is the C runtime's alone: MSVC Debug's runs the exit as others go on
-    if (scenario.onWorker && (scenario.phase != Phase::End || pastTheEnd(scenario.releaseAt)))
+    // Without the log's handlers an abort is the C runtime's alone: MSVC Debug's runs the exit as other threads go on
+    if (!handlersAt(scenario.releaseAt))
         return Crash::Fault;
     rand_default_t random;
     srand64_r(random, seed ^ 0x5bd1e9955bd1e995ull);
