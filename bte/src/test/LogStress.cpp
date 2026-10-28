@@ -2,6 +2,7 @@
 #include "AsyncLog.h"
 #include "DestructionManager.h"
 #include "SyncLog.h"
+#include "date.h"
 #include "debug.h"
 #include "random.h"
 #include "sysutil.h"
@@ -12,6 +13,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <algorithm>
 #include <atomic>
 #include <bit>
@@ -1642,6 +1644,41 @@ std::string crashProblem(const Scenario& scenario, uint64_t seed, long long code
     return checkLog(scenario, seed, readText(logFile));
 }
 
+bool createNew(const fs::path& path)
+{
+#ifdef _WIN32
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, 0, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+        return false;
+    CloseHandle(file);
+#else
+    const int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0644);
+    if (fd < 0)
+        return false;
+    close(fd);
+#endif
+    return true;
+}
+
+// "log-stress-<scenario>-<run>-20261028-121005.txt", then the pid when another parent has that name
+fs::path createLogFile(const Scenario& scenario, int run)
+{
+    const time_t now = time(nullptr);
+    tm local {};
+    localtime_r(&now, &local);
+    char stamp[16];
+    strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &local);
+    const fs::path base = fs::temp_directory_path() / fmtStr("log-stress-%s-%d-%s", scenario.name, run, stamp);
+    fs::path logFile = base;
+    logFile += ".txt";
+    if (createNew(logFile))
+        return logFile;
+    logFile = base;
+    logFile += fmtStr("-%u.txt", currentProcessId());
+    createNew(logFile);
+    return logFile;
+}
+
 // False at the scenario's first failed run, whose log stays for a look
 bool runScenario(const fs::path& self, const Scenario& scenario, int runs)
 {
@@ -1649,8 +1686,7 @@ bool runScenario(const fs::path& self, const Scenario& scenario, int runs)
     for (int run = 0; run < runs; ++run)
     {
         const uint64_t seed = rand64() | 1;
-        const fs::path logFile = fs::temp_directory_path() /
-                                 fmtStr("log-stress-%u-%s-%d.txt", currentProcessId(), scenario.name, run);
+        const fs::path logFile = createLogFile(scenario, run + 1);
         fs::path errorFile = logFile;
         errorFile += ".err";
         fs::path dumpFile = logFile;
