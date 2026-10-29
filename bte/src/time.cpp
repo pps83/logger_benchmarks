@@ -127,7 +127,7 @@ long long debug_qpcEpochBase()
 // This way, timeSec will return values very close to values returned by std::time.
 // TimeAlignment unit test verifies that this is withing 5 ms.
 // TODO: re-anchor at run time at NTP's rate (adjtimex on Linux): the counter's nominal rate is ~15 ppm off real time
-static long long NOINLINE calcQpcEpochBase(long long& qpcBase)
+static long long NOINLINE calcQpcEpochBase()
 {
     setFreq();
     const int N = 3;
@@ -157,15 +157,14 @@ static long long NOINLINE calcQpcEpochBase(long long& qpcBase)
     long long ft0_sec = ftx / ftFreq;
     long long ft0_nsec = ftx % ftFreq;
 
-    return qpcBase = (qpc0_sec - ft0_sec) * qpcFreq + (qpc0_nsec - ft0_nsec * qpcFreq / ftFreq);
+    return (qpc0_sec - ft0_sec) * qpcFreq + (qpc0_nsec - ft0_nsec * qpcFreq / ftFreq);
 }
 
+// Two threads can make the first call: a LOG in a static initializer starts the logger thread
 static long long qpcEpochBase()
 {
-    static long long qpcBase = 0;
-    if (qpcBase)
-        return qpcBase;
-    return calcQpcEpochBase(qpcBase);
+    static const long long qpcBase = calcQpcEpochBase();
+    return qpcBase;
 }
 
 picosec ticksToPico(long long x)

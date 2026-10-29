@@ -288,32 +288,31 @@ long long debug_qpcEpochBase()
 // the goal of the function is to align values returned by qpc with values returned by ft.
 // This way, timeSec will return values very close to values returned by std::time.
 // TimeAlignment unit test verifies that this is withing 5 ms.
-static long long NOINLINE calcQpcEpochBase(long long& qpcBase)
+static long long NOINLINE calcQpcEpochBase()
 {
     setFreq();
 #if defined(WINDOWS_TSC)
     auto base = int128_t(::debug_qpcEpochBase() - qpcBias);
     base *= qpcFreq;
     base /= FREQ_10MHz;
-    return qpcBase = static_cast<long long>(base);
+    return static_cast<long long>(base);
 #elif defined(LINUX_TSC)
     timespec ts;
     const long long before = static_cast<long long>(qpc());
     clock_gettime(CLOCK_REALTIME, &ts);
     const long long after = static_cast<long long>(qpc());
     const long long ns = ts.tv_sec * FREQ_1GHz + ts.tv_nsec;
-    return qpcBase = before + (after - before) / 2 - static_cast<long long>(int128_t(ns) * qpcFreq / FREQ_1GHz);
+    return before + (after - before) / 2 - static_cast<long long>(int128_t(ns) * qpcFreq / FREQ_1GHz);
 #else
-    return qpcBase = debug_qpcEpochBase();
+    return debug_qpcEpochBase();
 #endif
 }
 
+// Two threads can make the first call: a LOG in a static initializer starts the logger thread
 static long long qpcEpochBase()
 {
-    static long long qpcBase = 0;
-    if (qpcBase)
-        return qpcBase;
-    return calcQpcEpochBase(qpcBase);
+    static const long long qpcBase = calcQpcEpochBase();
+    return qpcBase;
 }
 
 #if defined(WINDOWS_TSC)
