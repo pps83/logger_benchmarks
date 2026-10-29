@@ -827,6 +827,94 @@ TEST_F(LogTest, FaultingFormatterWritesItsLog)
     EXPECT_EQ(count(text, "; values: 1\n"), 1u);
 }
 
+// The crash handler builds the failed line on its stack, without the allocator: long values are cut at its bound
+TEST_F(LogTest, FaultingFormatterWithLongValuesWritesABoundedLine)
+{
+    EXPECT_DEATH(
+    {
+        LOG("side {} {}", Side::Sell, std::string(3000, 'v'));
+        LOG();
+    },
+    "");
+    const std::string text = logged();
+    const size_t at = text.find("LOG(\"side {} {}\", Side::Sell, std::string(3000, 'v')) failed: ");
+    ASSERT_NE(at, std::string::npos) << text;
+    const size_t end = text.find('\n', at);
+    ASSERT_NE(end, std::string::npos);
+    EXPECT_LE(end - at, 1024u);
+    EXPECT_NE(text.find("; values: 1, \"vvvv", at), std::string::npos);
+    EXPECT_EQ(text.compare(end - 3, 3, "..."), 0) << "a cut line ends in ...";
+    EXPECT_EQ(text.find(std::string(1000, 'v')), std::string::npos);
+}
+
+// A formatter that throws is written by the logger thread with its allocator at hand: long values come out whole
+TEST_F(LogTest, ThrowingFormatterWithLongValuesWritesThemWhole)
+{
+    EXPECT_EXIT(
+    {
+        LOG("venue {} {}", static_cast<Venue>(7), std::string(3000, 'v'));
+        exit(0);
+    },
+    testing::ExitedWithCode(0), "");
+    EXPECT_EQ(count(logged(), "failed: unknown venue; values: 7, \"" + std::string(3000, 'v') + "\"\n"), 1u);
+}
+
+#if defined(_MSC_VER) && defined(_DEBUG)
+// The exit code a child takes at the first allocation a crash flush makes, before anything else can run
+constexpr int kAllocatedInCrash = 77;
+static _CRT_ALLOC_HOOK gPreviousAllocHook = nullptr;
+
+static int failOnCrashAllocation(int allocType, void* data, size_t size, int blockType, long request,
+                                 const unsigned char* file, int line)
+{
+    if (allocType != _HOOK_FREE && crashFlushing())
+        _exit(kAllocatedInCrash);
+    return gPreviousAllocHook != nullptr ? gPreviousAllocHook(allocType, data, size, blockType, request, file, line)
+                                         : TRUE;
+}
+
+static bool notAllocatedInCrash(int status)
+{
+    return status != kAllocatedInCrash;
+}
+
+// The debug heap's hook sees every allocation: a crash flush on the logger thread, the log's first lines, makes none
+TEST_F(LogTest, ACrashOnTheFirstLogsFormattingAllocatesNothing)
+{
+    EXPECT_EXIT(
+    {
+        gPreviousAllocHook = _CrtSetAllocHook(failOnCrashAllocation);
+        LOG("side {} {}", Side::Sell, std::string(3000, 'v'));
+        LOG();
+    },
+    notAllocatedInCrash, "");
+    EXPECT_EQ(count(logged(), "LOG(\"side {} {}\", Side::Sell, std::string(3000, 'v')) failed: "), 1u);
+}
+
+static void startTheLogger()
+{
+    LOG("the logger starts on another thread");
+    LOG();
+}
+
+static void crashWithAPendingSyncRepeat()
+{
+    for (int i = 0; i < 3; ++i)
+        LLOG("pending repeat %d", 1);
+    std::thread(startTheLogger).join();
+    gPreviousAllocHook = _CrtSetAllocHook(failOnCrashAllocation);
+    *(volatile int*)nullptr = 0;
+}
+
+// A crash on a thread with synchronous repeats pending writes their count, and allocates nothing for it
+TEST_F(LogTest, ACrashWithAPendingSyncRepeatAllocatesNothing)
+{
+    // On its own thread: gtest catches a crash in the test body before the crash handler sees it
+    EXPECT_EXIT(std::thread(crashWithAPendingSyncRepeat).join(), notAllocatedInCrash, "");
+    EXPECT_EQ(count(logged(), "repeated 2 times: LLOG(\"pending repeat %d\", 1)\n"), 1u);
+}
+#endif
+
 TEST_F(LogTest, FirstLogsOfThreadsThenExit)
 {
     EXPECT_EXIT(
@@ -1007,6 +1095,22 @@ TEST_F(LogTest, LogFlushWritesTheSyncRepeatCount)
         exit(0);
     },
     testing::ExitedWithCode(0), "\\[counted\\]");
+}
+
+// A crash names the repeated LLOG by its statement as written: no formatter and no allocator runs in the handler
+TEST_F(LogTest, ACrashFlushWritesTheSyncRepeatCountAsTheStatement)
+{
+    EXPECT_EXIT(
+    {
+        for (int i = 0; i < 3; ++i)
+            LLOG("sync line %d", 5);
+        flushAsyncLogForCrash();
+        exit(0);
+    },
+    testing::ExitedWithCode(0), "");
+    const std::string text = logged();
+    EXPECT_EQ(count(text, "sync line 5\n"), 1u);
+    EXPECT_EQ(count(text, "repeated 2 times: LLOG(\"sync line %d\", 5)\n"), 1u);
 }
 
 TEST_F(LogTest, SyncRepeatCountComesBeforeTheFirstLog)

@@ -10,6 +10,7 @@
 #include <time.h>
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <string_view>
 #include <thread>
@@ -110,12 +111,17 @@ void readThreadName(char (&name)[kThreadNameWidth + 1])
     LocalFree(description);
 #else
     // Not the OS's name: a new thread inherits its creator's, so every unnamed thread would carry another's name
+    readGivenThreadName(name);
+#endif
+}
+
+void readGivenThreadName(char (&name)[kThreadNameWidth + 1])
+{
     const char* given = givenThreadName();
     size_t length = 0;
     for (; length < kThreadNameWidth && given[length] != 0; ++length)
         name[length] = given[length];
     name[length] = '\0';
-#endif
 }
 
 // Taken once, so log times stay monotonic across clock and daylight saving changes
@@ -196,6 +202,11 @@ bool holdsLogLock()
 void setCrashFlushing(bool flushing)
 {
     tCrashFlushing = flushing;
+}
+
+bool crashFlushing()
+{
+    return tCrashFlushing;
 }
 
 void setCrashWaitMs(long long ms)
@@ -448,7 +459,8 @@ static void openLogFile(double epochSeconds)
         writeRunStart(epochSeconds);
 }
 
-void writeLogLine(std::string& line, double epochSeconds, uint32_t threadId, std::string_view threadName, bool flush)
+void writeLogLine(char* line, size_t size, double epochSeconds, uint32_t threadId, std::string_view threadName,
+                  bool flush)
 {
     if (AsyncLogSilent || !lockLog())
         return;
@@ -459,15 +471,16 @@ void writeLogLine(std::string& line, double epochSeconds, uint32_t threadId, std
     }
     if (const LogLineHook hook = gLogLineHook.load(std::memory_order_acquire))
     {
-        hook(threadId, threadName, std::string_view(line).substr(kLogPrefixSize, line.size() - kLogPrefixSize - 1));
+        hook(threadId, threadName, std::string_view(line, size).substr(kLogPrefixSize, size - kLogPrefixSize - 1));
         unlockLog();
         return;
     }
-    const size_t start = printLogPrefix(line.data(), epochSeconds, threadId, threadName);
-    const std::string_view text = std::string_view(line).substr(start);
+    const size_t start = printLogPrefix(line, epochSeconds, threadId, threadName);
+    const std::string_view text = std::string_view(line, size).substr(start);
     if constexpr ((kLogMode & (LogFileTruncate | LogFileAppend)) != 0)
     {
-        if (gLogFile == nullptr && !gLogFileFailed)
+        // Never from a crash: opening allocates, and the logger thread opened it ahead at its first poll
+        if (gLogFile == nullptr && !gLogFileFailed && !tCrashFlushing)
         {
             logTransition(LogTransition::SyncLogOpen);
             openLogFile(epochSeconds);
@@ -498,6 +511,27 @@ void writeLogLine(std::string& line, double epochSeconds, uint32_t threadId, std
     }
     gWrittenSinceFlush.store(true, std::memory_order_relaxed);
     unlockLog();
+}
+
+void writeLogLine(std::string& line, double epochSeconds, uint32_t threadId, std::string_view threadName, bool flush)
+{
+    writeLogLine(line.data(), line.size(), epochSeconds, threadId, threadName, flush);
+}
+
+void openLogFileAhead()
+{
+    if constexpr ((kLogMode & (LogFileTruncate | LogFileAppend)) != 0)
+    {
+        if (AsyncLogSilent || !lockLog())
+            return;
+        if (!gLogClosed && gLogFile == nullptr && !gLogFileFailed
+            && gLogLineHook.load(std::memory_order_acquire) == nullptr)
+        {
+            logTransition(LogTransition::SyncLogOpen);
+            openLogFile(ticksToTime(timeTicks()));
+        }
+        unlockLog();
+    }
 }
 
 // Every later line, on any thread, is dropped
@@ -683,6 +717,43 @@ void writeSyncRepeats(bool endRun)
     tSyncRepeats.writeCount();
     if (endRun)
         tSyncRepeats.size = 0;
+}
+
+void writeSyncRepeatsForCrash()
+{
+    SyncRepeats& repeats = tSyncRepeats;
+    if (repeats.count == 0)
+        return;
+    const uint64_t count = repeats.count;
+    repeats.count = 0;
+    uint64_t tag;
+    memcpy(&tag, repeats.last + sizeof(uint64_t), sizeof(tag));
+    const logdetail::Site& site = logdetail::siteOf(tag);
+    constexpr size_t kTextMax = 512;
+    char line[kLogPrefixSize + kTextMax + 2];
+    memset(line, ' ', kLogPrefixSize);
+    logdetail::BoundedText text {line + kLogPrefixSize, kTextMax};
+    char number[24] {};
+    text += "repeated ";
+    text += std::string_view(number, std::to_chars(number, number + sizeof(number), count).ptr - number);
+    text += count > 1 ? " times: " : " time: ";
+    if (site.text == nullptr)
+        text += "a LOG";
+    else
+    {
+        text += site.llog ? "LLOG(" : "LOG(";
+        logdetail::appendQuoted(text, site.text);
+        text += ", ";
+        text += site.text + strlen(site.text) + 1;
+        text += ')';
+    }
+    text.markCut();
+    const size_t size = kLogPrefixSize + text.size;
+    line[size] = '\n';
+    line[size + 1] = '\0';
+    char name[kThreadNameWidth + 1];
+    readGivenThreadName(name);
+    writeLogLine(line, size + 1, ticksToTime(timeTicks()), logThreadId(), name, false);
 }
 
 // With no async logger, LLOG counts its thread's repeats as LOG does; only their thread writes the count

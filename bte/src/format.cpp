@@ -125,7 +125,8 @@ void logdetail::formatPrintf(std::string& out, const char* format, ...)
     va_end(args);
 }
 
-void logdetail::appendQuoted(std::string& out, std::string_view text)
+template <typename Out>
+static void appendQuotedTo(Out& out, std::string_view text)
 {
     out += '"';
     for (const char c : text)
@@ -152,6 +153,16 @@ void logdetail::appendQuoted(std::string& out, std::string_view text)
         }
     }
     out += '"';
+}
+
+void logdetail::appendQuoted(std::string& out, std::string_view text)
+{
+    appendQuotedTo(out, text);
+}
+
+void logdetail::appendQuoted(BoundedText& out, std::string_view text)
+{
+    appendQuotedTo(out, text);
 }
 
 void logdetail::formatFmt(std::string& out, std::string_view format, std::format_args args)

@@ -61,13 +61,15 @@ using logdetail::siteOf;
 constinit thread_local uint64_t tFormattingTag = 0;
 constinit thread_local const unsigned char* tFormattingArgs = nullptr;
 
+// The failed line's bound in the crash handler, which builds it on its own stack
+constexpr size_t kFailedLineMax = 1024;
+
 // LOG("<format>", <arguments>) failed: <what>; values: <values>; returns where the record's arguments end
-const unsigned char* failedLine(uint64_t tag, const unsigned char* args, const char* what, std::string& out)
+const unsigned char* failedLine(uint64_t tag, const unsigned char* args, const char* what, logdetail::BoundedText& out)
 {
     const logdetail::Site& site = siteOf(tag);
-    std::string values;
-    const unsigned char* end = site.values(args, values);
-    out.clear();
+    out.size = 0;
+    out.cut = false;
     if (site.text == nullptr)
         out += "a LOG failed";
     else
@@ -80,8 +82,12 @@ const unsigned char* failedLine(uint64_t tag, const unsigned char* args, const c
     }
     out += ": ";
     out += what;
-    if (!values.empty())
-        out += "; values: " + values;
+    const size_t withoutValues = out.size;
+    out += "; values: ";
+    logdetail::BoundedText values {out.data + out.size, out.capacity - out.size};
+    const unsigned char* end = site.values(args, values);
+    out.size = values.size != 0 ? out.size + values.size : withoutValues;
+    out.cut = out.cut || values.cut;
     return end;
 }
 
@@ -105,7 +111,18 @@ const unsigned char* formatterThrew(uint64_t tag, const unsigned char* args, con
     if (debuggerPresent())
         stopForDebugger();
 #endif
-    return failedLine(tag, args, what, out);
+    // The allocator is at hand here: the line grows until it is whole
+    for (size_t capacity = kFailedLineMax;; capacity *= 2)
+    {
+        out.resize(capacity);
+        logdetail::BoundedText line {out.data(), capacity};
+        const unsigned char* end = failedLine(tag, args, what, line);
+        if (!line.cut)
+        {
+            out.resize(line.size);
+            return end;
+        }
+    }
 }
 
 // The record this thread formats; the outer one again after, as a repeat count formats the repeated record inside it
@@ -171,11 +188,11 @@ const unsigned char* formatRepeats(const unsigned char* bytes, std::string& out)
     return formatRepeatCount(out, count, bytes);
 }
 
-const unsigned char* repeatedValues(const unsigned char* bytes, std::string& out)
+const unsigned char* repeatedValues(const unsigned char* bytes, logdetail::BoundedText& out)
 {
     uint64_t tag;
     memcpy(&tag, bytes + sizeof(uint64_t), sizeof(tag));
-    out.clear();
+    out.size = 0;
     const unsigned char* args = bytes + logdetail::kRecordHeader;
     return tag != 0 ? siteOf(tag).values(args, out) : args;
 }
@@ -591,6 +608,8 @@ double recordTime(const unsigned char* record)
 // On the thread itself, before the logger thread reads: unread records with their own time and name
 void writeUnread(quill::detail::ThreadContext* context)
 {
+    // Ahead of the formatting, as the logger thread's first poll does: a crash in a formatter must find the file open
+    openLogFileAhead();
     auto& queue = context->get_spsc_queue<QueueOptions::queue_type>();
     char threadName[kThreadNameWidth + 1];
     readThreadName(threadName);
@@ -761,6 +780,7 @@ void setUpLoggerThread()
     done = true;
     setThreadName("AsyncLog");
     setLoggerThreadCrashHooks();
+    openLogFileAhead();
 }
 
 // Repeats carry no timestamp, so the logger thread times a pending count with its own clock: it writes the count once
@@ -1144,7 +1164,7 @@ void flushAsyncLog()
 
 void flushAsyncLogForCrash()
 {
-    writeSyncRepeats(false);
+    writeSyncRepeatsForCrash();
     if (const QuillUse use; use)
     {
         waitWhileLinesWritten();
@@ -1162,14 +1182,18 @@ void writeLineBeingFormatted(const char* what)
         return;
     // Once, though several handlers see the same crash
     tFormattingArgs = nullptr;
-    std::string text;
+    // On the stack and bounded: the crash may be inside the allocator
+    char line[kLogPrefixSize + kFailedLineMax + 2];
+    memset(line, ' ', kLogPrefixSize);
+    logdetail::BoundedText text {line + kLogPrefixSize, kFailedLineMax};
     failedLine(tFormattingTag, args, what, text);
-    std::string line(kLogPrefixSize, ' ');
-    line += text;
-    line += '\n';
+    text.markCut();
+    const size_t size = kLogPrefixSize + text.size;
+    line[size] = '\n';
+    line[size + 1] = '\0';
     char name[kThreadNameWidth + 1];
-    readThreadName(name);
-    writeLogLine(line, ticksToTime(timeTicks()), logThreadId(), name, false);
+    readGivenThreadName(name);
+    writeLogLine(line, size + 1, ticksToTime(timeTicks()), logThreadId(), name, false);
     flushSyncLog();
 }
 

@@ -14,15 +14,23 @@ uint32_t logThreadId();
 
 // The calling thread's name as the OS keeps it, cut to the log's name column
 void readThreadName(char (&name)[kThreadNameWidth + 1]);
+// The name setThreadName gave it, from this process's own storage: a crash writes it, since Windows allocates the OS's
+void readGivenThreadName(char (&name)[kThreadNameWidth + 1]);
 
 // line: kLogPrefixSize bytes for the prefix, the message and '\n'; shared by the logger thread and synchronous writes
 void writeLogLine(std::string& line, double epochSeconds, uint32_t threadId, std::string_view threadName, bool flush);
+// The same over a caller's buffer, a crash handler's on its stack: `size` bytes and a NUL after them
+void writeLogLine(char* line, size_t size, double epochSeconds, uint32_t threadId, std::string_view threadName,
+                  bool flush);
+// The logger thread's first poll opens the file before any record is formatted, so a crash never has to
+void openLogFileAhead();
 
 // True inside writeLogLine, which a crash there never leaves
 bool holdsLogLock();
 
 // While set, the thread's waits for the log's lock end after a second and it leaves stdio alone, so a crash goes on
 void setCrashFlushing(bool flushing);
+bool crashFlushing();
 
 // A crash flush stops waiting for lines once none was written for this long
 constexpr long long kCrashWaitMs = 10000;
@@ -65,6 +73,8 @@ void logTransition(LogTransition transition);
 
 // The calling thread's pending synchronous LLOG count; endRun: a different line follows, so an equal LLOG is a new line
 void writeSyncRepeats(bool endRun);
+// The same for a crash: the statement as written stands for the line, so no formatter and no allocator runs
+void writeSyncRepeatsForCrash();
 
 // Set by the async logger from its start to its end: LLOG's records and flushes go to it
 using LlogRecordSink = void (*)(const unsigned char* record, size_t size);

@@ -47,8 +47,8 @@ static void flushForCrash(const char* what)
 
 static std::terminate_handler oldTerminate = nullptr;
 
-// The exception std::terminate was called for, if any
-static std::string currentExceptionText()
+// The exception std::terminate was called for, if any; what() is copied, since MSVC rethrows a copy that ends here
+static const char* currentExceptionText(char (&buffer)[256])
 {
     const std::exception_ptr current = std::current_exception();
     if (current == nullptr)
@@ -59,7 +59,10 @@ static std::string currentExceptionText()
     }
     catch (const std::exception& error)
     {
-        return error.what();
+        const size_t length = strnlen(error.what(), sizeof(buffer) - 1);
+        memcpy(buffer, error.what(), length);
+        buffer[length] = '\0';
+        return buffer;
     }
     catch (...)
     {
@@ -71,19 +74,22 @@ static std::string currentExceptionText()
 static LPTOP_LEVEL_EXCEPTION_FILTER oldSeh = nullptr;
 static void (*oldAbort)(int) = nullptr;
 
-static std::string sehText(DWORD code)
+// A literal, or the code in the caller's buffer: the crash may be inside the allocator
+static const char* sehText(DWORD code, char (&buffer)[32])
 {
     if (code == EXCEPTION_ACCESS_VIOLATION)
         return "access violation";
     if (code == EXCEPTION_STACK_OVERFLOW)
         return "stack overflow";
-    return std::format("exception 0x{:08X}", code);
+    *std::format_to_n(buffer, sizeof(buffer) - 1, "exception 0x{:08X}", code).out = '\0';
+    return buffer;
 }
 
 // After the flush, a handler installed before ours decides, as it would have without us: it may mend the crash
 static LONG WINAPI WindowsSehHandler(EXCEPTION_POINTERS* exception)
 {
-    flushForCrash(sehText(exception->ExceptionRecord->ExceptionCode).c_str());
+    char text[32];
+    flushForCrash(sehText(exception->ExceptionRecord->ExceptionCode, text));
     return oldSeh != nullptr ? oldSeh(exception) : EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -172,7 +178,8 @@ static void PosixSignalHandler(int sig, siginfo_t* info, void* context)
 
 static void TerminateHandler()
 {
-    flushForCrash(currentExceptionText().c_str());
+    char text[256];
+    flushForCrash(currentExceptionText(text));
     auto handler = oldTerminate;
     oldTerminate = nullptr;
     if (handler)

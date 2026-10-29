@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <format>
@@ -615,22 +616,66 @@ auto unpack(Reader& reader)
         return reader.scalar<Stored<K, D>>();
 }
 
+// Text in the caller's buffer, so a crash handler builds a line without the allocator; what does not fit is dropped
+struct BoundedText
+{
+    char* data;
+    size_t capacity;
+    size_t size = 0;
+    bool cut = false;
+
+    BoundedText& operator+=(std::string_view text)
+    {
+        const size_t count = (std::min)(text.size(), capacity - size);
+        memcpy(data + size, text.data(), count);
+        size += count;
+        cut = cut || count < text.size();
+        return *this;
+    }
+
+    BoundedText& operator+=(char c)
+    {
+        if (size < capacity)
+            data[size++] = c;
+        else
+            cut = true;
+        return *this;
+    }
+
+    // A cut text ends in "...", so a reader knows it is not whole
+    void markCut()
+    {
+        if (!cut || capacity < 3)
+            return;
+        size = capacity;
+        memcpy(data + size - 3, "...", 3);
+    }
+
+    std::string_view view() const
+    {
+        return {data, size};
+    }
+};
+
 // Defined in format.cpp
 void formatPrintf(std::string& out, const char* format, ...);
 void formatFmt(std::string& out, std::string_view format, std::format_args args);
 void appendQuoted(std::string& out, std::string_view text);
+void appendQuoted(BoundedText& out, std::string_view text);
 
 // Defined in log.cpp
 void logFormatted(std::string_view format, std::format_args args);
 
 // Formats a record's arguments on the logger thread and returns where they end
 using FormatFn = const unsigned char* (*)(const unsigned char* bytes, std::string& out);
+// Writes a record's stored values and returns where its arguments end
+using ValuesFn = const unsigned char* (*)(const unsigned char* bytes, BoundedText& out);
 
 // One static Site per format, argument spelling, argument types and LOG or LLOG; its address identifies them
 struct Site
 {
     FormatFn format;
-    FormatFn values = nullptr;  // the stored values as they are and their end, for the line a failed formatting writes
+    ValuesFn values = nullptr;  // the stored values as they are and their end, for the line a failed formatting writes
     const char* text = nullptr; // the format, a NUL, then the arguments as written
     bool llog = false;
 };
@@ -657,26 +702,35 @@ const unsigned char* replay(const unsigned char* bytes, std::string& out)
     return reader.position();
 }
 
+template <typename T>
+void appendFormatted(BoundedText& out, const T& value)
+{
+    const auto written = std::format_to_n(out.data + out.size, out.capacity - out.size, "{}", value);
+    const size_t room = out.capacity - out.size;
+    out.size += (std::min)(static_cast<size_t>(written.size), room);
+    out.cut = out.cut || static_cast<size_t>(written.size) > room;
+}
+
 // A stored value as it is, without the formatter its type may have, after a comma unless it is the first
 template <typename T>
-void appendValue(std::string& out, const T& value)
+void appendValue(BoundedText& out, const T& value)
 {
-    if (!out.empty())
+    if (out.size != 0)
         out += ", ";
     if constexpr (std::is_same_v<T, std::string_view> || std::is_same_v<T, const char*>)
         appendQuoted(out, value);
     else if constexpr (std::is_enum_v<T>)
-        out += std::format("{}", std::to_underlying(value));
+        appendFormatted(out, std::to_underlying(value));
     else
-        out += std::format("{}", value);
+        appendFormatted(out, value);
 }
 
 template <Kind K, FixedString S, typename... D>
-const unsigned char* storedValues(const unsigned char* bytes, std::string& out)
+const unsigned char* storedValues(const unsigned char* bytes, BoundedText& out)
 {
     Reader reader(bytes);
     const auto values = unpackAll<K, S, D...>(reader, std::index_sequence_for<D...> {});
-    out.clear();
+    out.size = 0;
     std::apply([&](const auto&... value) { (appendValue(out, value), ...); }, values);
     return reader.position();
 }
@@ -994,12 +1048,12 @@ inline const unsigned char* formatLiteral(const unsigned char* bytes, std::strin
 }
 
 // The literal's text is not read: reading it may be what failed
-inline const unsigned char* literalValues(const unsigned char* bytes, std::string& out)
+inline const unsigned char* literalValues(const unsigned char* bytes, BoundedText& out)
 {
     Reader reader(bytes);
     static_cast<void>(reader.scalar<const char*>());
     static_cast<void>(reader.scalar<uint32_t>());
-    out.clear();
+    out.size = 0;
     return reader.position();
 }
 
@@ -1045,7 +1099,15 @@ inline const unsigned char* formatText(const unsigned char* bytes, std::string& 
     return reader.position();
 }
 
-inline constexpr Site kTextSite {&formatText, &formatText}; // its one value is the text
+inline const unsigned char* textValues(const unsigned char* bytes, BoundedText& out)
+{
+    Reader reader(bytes);
+    out.size = 0;
+    out += reader.string();
+    return reader.position();
+}
+
+inline constexpr Site kTextSite {&formatText, &textValues}; // its one value is the text
 
 } // namespace logdetail
 
