@@ -3,8 +3,8 @@
 #include "sysutil.h"
 #include "TestFile.h"
 #include "SyncLog.h"
-#include <cstdio>
-#include <cstdlib>
+#include <stdio.h>
+#include <stdlib.h>
 #include <exception>
 #include <filesystem>
 #include <string>
@@ -66,7 +66,7 @@ TEST_F(LogCrashTest, FlushOnAbort)
     {
         logFillers();
         LOG("LOG_CRASH_MARKER_ABORT");
-        std::abort();
+        abort();
     },
     [](int) { return true; },
     "");
@@ -96,7 +96,7 @@ TEST_F(LogCrashTest, CountOfTheCrashingThread)
         logFillers();
         LOG("LOG_CRASH_MARKER_REPEAT");
         LOG("LOG_CRASH_MARKER_REPEAT");
-        std::abort();
+        abort();
     },
     [](int) { return true; },
     "");

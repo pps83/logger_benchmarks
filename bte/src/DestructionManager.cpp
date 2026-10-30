@@ -4,6 +4,7 @@
 #include <mutex>
 #include <vector>
 #include <assert.h>
+#include <stdlib.h>
 
 struct DestructionManagerImpl
 {
@@ -14,11 +15,15 @@ struct DestructionManagerImpl
     };
     std::mutex mx;
     std::vector<Entry> entries;
+    bool destroying = false;
 
     void add(int index, std::shared_ptr<void> ptr)
     {
         assert(ptr);
         std::scoped_lock lock(mx);
+        // A singleton that first appears in the teardown can be given no place in its order: a bug in the caller
+        if (destroying)
+            abort();
         if (entries.empty())
             entries.reserve(32);
         entries.push_back({index, std::move(ptr)});
@@ -26,6 +31,10 @@ struct DestructionManagerImpl
 
     void destroyAll()
     {
+        {
+            std::scoped_lock lock(mx);
+            destroying = true;
+        }
         // Sort ascending: lower index = destroyed later; stable so equal-index entries preserve
         // registration order here, and are then destroyed in reverse (LIFO) by the loops below.
         std::stable_sort(entries.begin(), entries.end(),

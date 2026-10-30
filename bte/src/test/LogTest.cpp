@@ -328,23 +328,28 @@ struct std::formatter<Counter> : std::formatter<int>
 static void logStatementsWithLog()
 {
     LOG("literal line");
+    LOG("");
     LOG("printf %d %s %.2f", 7, "text", 1.5);
     LOG("fmt {} {} {}", 7, std::string("text"), 1.5);
     LOG("custom {}", Counter {3});
     LOG(std::string("a string"));
+    LOG(std::string());
 }
 
 static void logStatementsWithLlog()
 {
     LLOG("literal line");
+    LLOG("");
     LLOG("printf %d %s %.2f", 7, "text", 1.5);
     LLOG("fmt {} {} {}", 7, std::string("text"), 1.5);
     LLOG("custom {}", Counter {3});
     LLOG(std::string("a string"));
+    LLOG(std::string());
 }
 
+// An empty line in the file is its prefix alone, whose last character is a space
 static const std::vector<std::string> kStatementLines {
-    "literal line", "printf 7 text 1.50", "fmt 7 text 1.5", "custom 3", "a string",
+    "literal line", "", "printf 7 text 1.50", "fmt 7 text 1.5", "custom 3", "a string", "",
 };
 
 // The file holds these lines in this order, each a whole line
@@ -1137,7 +1142,7 @@ struct LogsSyncRunAroundLog
         LLOG(run);
         LOG("a different line");
         LLOG(run);
-        LLOG("");
+        LLOG();
     }
 };
 
@@ -2051,6 +2056,7 @@ static void logText()
     LOG("");
     LOG("literal with {} and 100%");
     LOG(std::string("std::string text"));
+    LOG(std::string());
     LOG(std::string_view("string_view text"));
     LLOG("llog %d %s", 5, "printf");
     LLOG(std::string_view("llog text"));
@@ -2062,8 +2068,8 @@ static void logText()
 TEST_F(LogLinesTest, TextLines)
 {
     const std::vector<std::string> expected {
-        "plain text", "literal with {} and 100%", "std::string text", "string_view text", "llog 5 printf", "llog text",
-        "x:3, y:4",
+        "plain text", "", "literal with {} and 100%", "std::string text", "", "string_view text", "llog 5 printf",
+        "llog text", "x:3, y:4",
     };
     EXPECT_EQ(linesOf(logText), expected);
 }

@@ -86,7 +86,7 @@ enum class Point
     ExitStart,        // a static object's destructor, before DestructionManager's objects
     DestructionAbove, // a DestructionManager object above the logger's level
     AsyncEnd,
-    AsyncEndWaited,
+    AsyncDetached,
     AsyncEnded,
     DestructionBelow, // one below it, after the logger's end
     SyncLogClose,
@@ -117,7 +117,7 @@ constexpr Scenario kScenarios[] = {
     {"ExitStart", Phase::End, Point::ExitStart},
     {"DestructionAbove", Phase::End, Point::DestructionAbove},
     {"AsyncEnd", Phase::End, Point::AsyncEnd},
-    {"AsyncEndWaited", Phase::End, Point::AsyncEndWaited},
+    {"AsyncDetached", Phase::End, Point::AsyncDetached},
     {"AsyncEnded", Phase::End, Point::AsyncEnded},
     {"DestructionBelow", Phase::End, Point::DestructionBelow},
     {"Abandoned", Phase::End, Point::AsyncEnd, Crash::None, false, true},
@@ -135,7 +135,7 @@ constexpr Scenario kScenarios[] = {
     {"CrashAtExitStart", Phase::End, Point::ExitStart, Crash::Drawn},
     {"CrashAtDestructionAbove", Phase::End, Point::DestructionAbove, Crash::Drawn},
     {"CrashAtAsyncEnd", Phase::End, Point::AsyncEnd, Crash::Drawn},
-    {"CrashAtAsyncEndWaited", Phase::End, Point::AsyncEndWaited, Crash::Drawn},
+    {"CrashAtAsyncDetached", Phase::End, Point::AsyncDetached, Crash::Drawn},
     {"CrashAtAsyncEnded", Phase::End, Point::AsyncEnded, Crash::Drawn},
     {"CrashAtDestructionBelow", Phase::End, Point::DestructionBelow, Crash::Drawn},
     {"CrashAtSyncLogClose", Phase::End, Point::SyncLogClose, Crash::Drawn},
@@ -149,7 +149,7 @@ constexpr Scenario kScenarios[] = {
     {"WorkerCrashAtExitStart", Phase::End, Point::ExitStart, Crash::Drawn, true},
     {"WorkerCrashAtDestructionAbove", Phase::End, Point::DestructionAbove, Crash::Drawn, true},
     {"WorkerCrashAtAsyncEnd", Phase::End, Point::AsyncEnd, Crash::Drawn, true},
-    {"WorkerCrashAtAsyncEndWaited", Phase::End, Point::AsyncEndWaited, Crash::Drawn, true},
+    {"WorkerCrashAtAsyncDetached", Phase::End, Point::AsyncDetached, Crash::Drawn, true},
     {"WorkerCrashAtAsyncEnded", Phase::End, Point::AsyncEnded, Crash::Drawn, true},
     {"WorkerCrashAtDestructionBelow", Phase::End, Point::DestructionBelow, Crash::Drawn, true},
 };
@@ -174,7 +174,7 @@ bool handlersAt(Point point)
     case Point::ExitStart:
     case Point::DestructionAbove:
     case Point::AsyncEnd:
-    case Point::AsyncEndWaited:
+    case Point::AsyncDetached:
         return true;
     case Point::SyncLogOpen:
     case Point::AsyncStart:
@@ -220,7 +220,7 @@ bool pointLogs(Point point)
     case Point::ExitStart:
     case Point::DestructionAbove:
     case Point::AsyncEnd:
-    case Point::AsyncEndWaited:
+    case Point::AsyncDetached:
     case Point::AsyncEnded:
     case Point::DestructionBelow:
     case Point::SyncLogClose:
@@ -246,7 +246,7 @@ bool crashKeepsLines(const Scenario& scenario)
     case Point::ExitStart:
     case Point::DestructionAbove:
     case Point::AsyncEnd:
-    case Point::AsyncEndWaited:
+    case Point::AsyncDetached:
     case Point::SyncLogClosed:
     case Point::AfterClose:
         return true;
@@ -714,8 +714,8 @@ Point pointOf(LogTransition transition)
         return Point::AsyncFirstRead;
     case LogTransition::AsyncEnd:
         return Point::AsyncEnd;
-    case LogTransition::AsyncEndWaited:
-        return Point::AsyncEndWaited;
+    case LogTransition::AsyncDetached:
+        return Point::AsyncDetached;
     case LogTransition::AsyncEnded:
         return Point::AsyncEnded;
     case LogTransition::SyncLogClose:

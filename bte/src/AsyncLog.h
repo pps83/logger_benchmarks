@@ -14,7 +14,6 @@ void flushAsyncLogForCrash();
 // In a crash handler: the queued LOG this thread was formatting, as written, with its values and what went wrong
 void writeLineBeingFormatted(const char* what);
 
-// Defined in log.cpp
 void setCrashHooks();
 void unsetCrashHooks();
 void setLoggerThreadCrashHooks();

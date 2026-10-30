@@ -174,7 +174,8 @@ picosec ticksToPico(long long x)
         ret = {x / FREQ_10MHz, (x % FREQ_10MHz) * (FREQ_1THz / FREQ_10MHz)};
     else if (qpcFreq1GHz)
         ret = {x / FREQ_1GHz, (x % FREQ_1GHz) * (FREQ_1THz / FREQ_1GHz)};
-    else if (qpcFreq < std::numeric_limits<long long>::max() / FREQ_1THz) // check if `(x % qpcFreq) * FREQ_1THz` could overflow long long
+    // check if `(x % qpcFreq) * FREQ_1THz` could overflow long long
+    else if (qpcFreq < std::numeric_limits<long long>::max() / FREQ_1THz)
         ret = {x / qpcFreq, (x % qpcFreq) * FREQ_1THz / qpcFreq};
     else
         ret = ticksToPicoScaled(x, 1);
@@ -210,8 +211,10 @@ picosec ticksToPicoScaled(long long snum, unsigned denom)
         }
     }
     // auto p = ticks * FREQ_1THz_128 + fractionalTicks * FREQ_1THz_128 / denom;
-    auto p = ticks * FREQ_1THz_128 + (shiftR ? (fractionalTicks * FREQ_1THz_128 >> shiftR) : (fractionalTicks * FREQ_1THz_128 / denom));
-    auto ps = static_cast<long long>(static_cast<uint64_t>(qpcFreq10MHz ? (p / static_cast<unsigned long>(FREQ_10MHz)) : (p / freq)));
+    auto p = ticks * FREQ_1THz_128
+           + (shiftR ? (fractionalTicks * FREQ_1THz_128 >> shiftR) : (fractionalTicks * FREQ_1THz_128 / denom));
+    auto ps = static_cast<long long>(
+        static_cast<uint64_t>(qpcFreq10MHz ? (p / static_cast<unsigned long>(FREQ_10MHz)) : (p / freq)));
     auto s = static_cast<long long>(sec);
     if (!negative)
         return picosec{s, ps};
@@ -233,7 +236,8 @@ picosec nanoToPicoScaled(long long snum, unsigned denom)
         sec = ticks / FREQ_1GHz;
         ticks = ticks % FREQ_1GHz;
     }
-    auto p = ticks * FREQ_1THz_128 + (shiftR ? (fractionalTicks * FREQ_1THz_128 >> shiftR) : (fractionalTicks * FREQ_1THz_128 / denom));
+    auto p = ticks * FREQ_1THz_128
+           + (shiftR ? (fractionalTicks * FREQ_1THz_128 >> shiftR) : (fractionalTicks * FREQ_1THz_128 / denom));
     auto ps = static_cast<long long>(static_cast<uint64_t>(p / static_cast<unsigned long>(FREQ_1GHz)));
     auto s = static_cast<long long>(sec);
     if (!negative)

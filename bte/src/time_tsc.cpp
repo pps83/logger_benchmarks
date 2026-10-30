@@ -350,7 +350,7 @@ long long tscToQpc(long long t) // see tscRawToQpcRaw for full calculation
 long long tscRawToQpcRaw(long long t) // QueryPerformanceCounter uses this logic to covert rdtsc values
 {
 #if defined(WINDOWS_TSC)
-    // full calculation: return (tscToQpc(t) + *RtlpHypervisorSharedUserVa_tscBias + qpcBias) >> *SharedUserData_qpcShift;
+    // in full: (tscToQpc(t) + *RtlpHypervisorSharedUserVa_tscBias + qpcBias) >> *SharedUserData_qpcShift
     return tscToQpc(t) + qpcBias;
 #elif defined(LINUX_TSC)
     return ::debug_qpcEpochBase() + tscToQpc(t - qpcEpochBase()); // both clocks count from the same UTC epoch
@@ -374,7 +374,8 @@ long long qpcToTsc(long long t)
 picosec ticksToPico(long long x)
 {
     picosec ret;
-    if (qpcFreq < std::numeric_limits<long long>::max() / FREQ_1THz) // check if `(x % qpcFreq) * FREQ_1THz` could overflow long long
+    // check if `(x % qpcFreq) * FREQ_1THz` could overflow long long
+    if (qpcFreq < std::numeric_limits<long long>::max() / FREQ_1THz)
         ret = {x / qpcFreq, (x % qpcFreq) * FREQ_1THz / qpcFreq};
     else
         ret = ticksToPicoScaled(x, 1);
@@ -402,7 +403,8 @@ picosec ticksToPicoScaled(long long snum, unsigned denom)
         ticks = ticks % freq;
     }
     // auto p = ticks * FREQ_1THz_128 + fractionalTicks * FREQ_1THz_128 / denom;
-    auto p = ticks * FREQ_1THz_128 + (shiftR ? (fractionalTicks * FREQ_1THz_128 >> shiftR) : (fractionalTicks * FREQ_1THz_128 / denom));
+    auto p = ticks * FREQ_1THz_128
+           + (shiftR ? (fractionalTicks * FREQ_1THz_128 >> shiftR) : (fractionalTicks * FREQ_1THz_128 / denom));
     auto ps = static_cast<long long>(static_cast<uint64_t>(p / freq));
     auto s = static_cast<long long>(sec);
     if (!negative)
@@ -413,8 +415,11 @@ picosec ticksToPicoScaled(long long snum, unsigned denom)
 
 static FORCEINLINE unsigned long long convertTicks(unsigned long long x, unsigned FREQ)
 {
-    if ((FREQ == FREQ_1GHz && x <= maxNsInU64) || (FREQ == FREQ_1MHz && x <= maxUsInU64) || (FREQ == FREQ_1KHz && x <= maxMsInU64) || FREQ == 1)
+    if ((FREQ == FREQ_1GHz && x <= maxNsInU64) || (FREQ == FREQ_1MHz && x <= maxUsInU64)
+        || (FREQ == FREQ_1KHz && x <= maxMsInU64) || FREQ == 1)
+    {
         return libdivide::libdivide_u64_branchfree_do(FREQ * x, &qpcFreqDiv);
+    }
     auto sec = libdivide::libdivide_u64_branchfree_do(x, &qpcFreqDiv);
     auto rem = x - sec * (unsigned long long)qpcFreq;
     return FREQ * sec + libdivide::libdivide_u64_branchfree_do(FREQ * rem, &qpcFreqDiv);

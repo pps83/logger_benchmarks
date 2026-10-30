@@ -9,7 +9,6 @@
 #include "quill/GlobalState.h"
 #include "quill/sinks/Sink.h"
 #include <signal.h>
-#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <atomic>
@@ -667,7 +666,6 @@ void endQueue()
         if (!gLoggerEnded.load(std::memory_order_relaxed) && !gLoggerReading.load(std::memory_order_relaxed))
             writeUnread(context);
     }
-    writePendingRepeat();
     logdetail::tWriter = &logdetail::kNoWriter;
     delete tThreadQueue;
     tThreadQueue = nullptr;
@@ -1019,18 +1017,7 @@ public:
     {
         logTransition(LogTransition::AsyncEnd);
         detachThread();
-        bool started = false;
-        {
-            QueuesLock lock; // start() assigns globalState under it
-            started = globalState != nullptr;
-        }
-        // Twice: the second writes what threads still running logged while the first was writing
-        if (started)
-        {
-            waitForQueuedLines();
-            waitForQueuedLines();
-        }
-        logTransition(LogTransition::AsyncEndWaited);
+        logTransition(LogTransition::AsyncDetached);
         std::vector<EndCount> counts;
         std::string holding;
         {
@@ -1256,6 +1243,11 @@ void logdetail::writeSync(const unsigned char* record)
 void logdetail::submitText(std::string_view text)
 {
     logFields(kTextSite, text);
+}
+
+void logdetail::flushLog()
+{
+    flushAsyncLog();
 }
 
 #ifdef _WIN32

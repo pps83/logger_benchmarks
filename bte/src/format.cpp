@@ -18,7 +18,7 @@ NORETURN void throw_runtime_error(const char* fmt, ...)
     std::string ret;
     APPEND_FORMAT(ret, fmt);
     LLOG("RUNTIME ERROR: %s", ret.c_str());
-    LLOG("");
+    LLOG();
 #ifndef NDEBUG
     if (debuggerPresent())
     {

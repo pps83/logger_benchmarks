@@ -24,7 +24,7 @@ extern "C" void _m_prefetchw(volatile const void*);
 #include <intrin.h>
 #endif
 
-void LOG(std::string_view text = std::string_view());
+void LOG(std::string_view text);
 
 namespace logdetail
 {
@@ -214,6 +214,13 @@ struct LiteralText
     size_t length;
 
     bool operator==(const LiteralText&) const = default;
+};
+
+// A C string argument as the call site has it: its length is taken in the record's one out-of-line call
+struct CText
+{
+    const char* text;
+    long long limit;
 };
 
 // A string literal or adjacent ones and nothing else: a leading quote can also start an expression giving a local array
@@ -559,8 +566,6 @@ std::string_view textView(const D& value, long long limit)
     }
     else if constexpr (std::is_pointer_v<D>)
     {
-        if (value == nullptr)
-            return std::string_view("(null)");
         if (limit >= 0)
             return std::string_view(value, strnlen(value, static_cast<size_t>(limit)));
         return std::string_view(value);
@@ -572,6 +577,29 @@ std::string_view textView(const D& value, long long limit)
     }
 }
 
+// A char array is read up to its end at most, so it needs no terminator
+template <typename D>
+constexpr long long textBound(long long limit)
+{
+    constexpr long long extent = static_cast<long long>(std::extent_v<D>);
+    return limit >= 0 && limit < extent ? limit : extent;
+}
+
+inline std::string_view textOf(CText value)
+{
+    return textView(value.text, value.limit);
+}
+
+template <typename F>
+FORCEINLINE F textOf(F value)
+{
+    return value;
+}
+
+// A field whose text is copied: its record is written in one out-of-line call
+template <typename F>
+constexpr bool isText = std::is_same_v<F, std::string_view> || std::is_same_v<F, CText>;
+
 // What a record stores for an argument: a scalar, a literal's address, or a string's text
 template <Kind K, ArgUse U, bool Quoted, typename T>
 FORCEINLINE auto field(const T& value, long long precision)
@@ -581,6 +609,10 @@ FORCEINLINE auto field(const T& value, long long precision)
         return static_cast<const void*>(textPointer(value));
     else if constexpr (Quoted && isCharArray<D>)
         return LiteralText {value, std::extent_v<D> - 1};
+    else if constexpr (isCharArray<D>)
+        return CText {value, textBound<D>(U.limit == -2 ? precision : U.limit)};
+    else if constexpr (isString<D> && std::is_pointer_v<D>)
+        return CText {value, U.limit == -2 ? precision : U.limit};
     else if constexpr (isString<D>)
         return textView(value, U.limit == -2 ? precision : U.limit);
     else
@@ -657,13 +689,11 @@ struct BoundedText
     }
 };
 
-// Defined in format.cpp
 void formatPrintf(std::string& out, const char* format, ...);
 void formatFmt(std::string& out, std::string_view format, std::format_args args);
 void appendQuoted(std::string& out, std::string_view text);
 void appendQuoted(BoundedText& out, std::string_view text);
 
-// Defined in log.cpp
 void logFormatted(std::string_view format, std::format_args args);
 
 // Formats a record's arguments on the logger thread and returns where they end
@@ -901,11 +931,11 @@ FORCEINLINE void publish(Writer& writer, size_t size)
     prefetchForWrite(writer.storage + ((position + 4096) & writer.mask));
 }
 
-// Defined in AsyncLog.cpp
 unsigned char* reserve(size_t size); // asks Quill for room; null: the record is written synchronously
 void commitAfterRepeats(unsigned char* record, size_t size);
 void writeSync(const unsigned char* record);
 void submitText(std::string_view text);
+void flushLog();
 
 // A record that differs from the thread's last one
 template <typename... F>
@@ -921,11 +951,12 @@ FORCEINLINE void commitRecord(Writer& writer, unsigned char* at, size_t size, ui
     publish(writer, size);
 }
 
-// Defined in SyncLog.cpp: an LLOG record goes to the async logger while it runs, else it is written synchronously
+// An LLOG record goes to the async logger while it runs, else it is written synchronously
 void submitLlog(const unsigned char* record, size_t size);
 void llogText(std::string_view text);
+void llogFlush();
 void llogFormatted(std::string_view format, std::format_args args);
-bool syncLinesDropped(); // in SyncLog.cpp: another thread ended the logger, or ExitProcess runs
+bool syncLinesDropped(); // another thread ended the logger, or ExitProcess runs
 
 // LLOG's record, built on the stack, so LLOG neither starts nor links the async logger
 template <typename... F>
@@ -999,12 +1030,29 @@ FORCEINLINE void recordFields(const Site& site, F... fields)
         logFields(site, fields...);
 }
 
+// The one call a record with text costs its call site: the lengths, the repeat check and the copies happen in here
+template <bool Llog, typename... F>
+NOINLINE void recordTextFields(const Site& site, F... fields)
+{
+    recordFields<Llog>(site, textOf(fields)...);
+}
+
+// A record of numbers and literals is written inline and calls nothing
+template <bool Llog, typename... F>
+FORCEINLINE void recordArgs(const Site& site, F... fields)
+{
+    if constexpr ((isText<F> || ...))
+        recordTextFields<Llog>(site, fields...);
+    else
+        recordFields<Llog>(site, fields...);
+}
+
 template <Kind K, FixedString S, bool Llog, typename... Args, size_t... I>
 FORCEINLINE void logArgs(const Site& site, std::index_sequence<I...>, const Args&... args)
 {
     constexpr std::array<ArgUse, sizeof...(Args)> uses = argUses<K, sizeof...(Args)>(S.view());
     constexpr std::array<bool, sizeof...(Args)> quoted = literalArgs<S, sizeof...(Args)>();
-    recordFields<Llog>(site, field<K, uses[I], quoted[I]>(args, previousInteger<I>(args...))...);
+    recordArgs<Llog>(site, field<K, uses[I], quoted[I]>(args, previousInteger<I>(args...))...);
 }
 
 template <FixedString S, bool Llog = false, typename... Args>
@@ -1068,20 +1116,40 @@ FORCEINLINE void recordText(std::string_view text)
         (LOG)(text);
 }
 
+// A C string alone: its length is taken in here, so the call site makes this one call
+template <bool Llog>
+NOINLINE void recordCText(CText text)
+{
+    recordText<Llog>(textOf(text));
+}
+
 // Quoted: the argument is spelled as a string literal, which lives as long as the program; any other text is copied
 template <bool Quoted, bool Llog = false, size_t N>
 FORCEINLINE void logOne(const char (&text)[N])
 {
-    if constexpr (Quoted && N > 1)
+    if constexpr (Quoted)
         recordFields<Llog>(kLiteralSite, static_cast<const char*>(text), static_cast<uint32_t>(N - 1));
     else
-        recordText<Llog>(std::string_view(text)); // LOG("") flushes, as LOG() does
+        recordCText<Llog>(CText {text, static_cast<long long>(N)});
 }
 
-template <bool Quoted, bool Llog = false, typename... T>
-FORCEINLINE void logOne(const T&... text)
+template <bool Quoted, bool Llog = false, typename T>
+FORCEINLINE void logOne(const T& text)
 {
-    recordText<Llog>(std::string_view(text...));
+    if constexpr (std::is_pointer_v<T>)
+        recordCText<Llog>(CText {text, -1});
+    else
+        recordText<Llog>(std::string_view(text));
+}
+
+// LOG() and LLOG() with no argument, the only flush: an empty text is an empty line
+template <bool Quoted, bool Llog = false>
+FORCEINLINE void logOne()
+{
+    if constexpr (Llog)
+        llogFlush();
+    else
+        flushLog();
 }
 
 // LLOG's own name, as llog is

@@ -60,7 +60,7 @@ enum class LogTransition
     AsyncPublished, // LOG sees the logger; LLOG's records don't go to it yet
     AsyncFirstRead, // on the logger thread, before its first read of the queues
     AsyncEnd,       // the async logger's end, before anything ended
-    AsyncEndWaited, // the queued lines are written; the logger hasn't ended
+    AsyncDetached,  // the exiting thread's queue ended; the other threads' LOGs still queue
     AsyncEnded,     // the logger thread stopped; the threads' pending counts not yet written
     SyncLogClose,   // DestructionManager's last object, before the log file closes
     SyncLogClosed,  // the log file closed: from here on nothing is logged

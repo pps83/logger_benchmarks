@@ -2,7 +2,6 @@
 #include "DestructionManager.h"
 #include "sysutil.h"
 #include "date.h"
-#include "UninitializedMemoryHacks.h"
 #include "quill/core/Rdtsc.h"
 #include <errno.h>
 #include <stdio.h>
@@ -618,11 +617,6 @@ void logSync(long long timeTick, std::string_view msg)
 {
     if (syncLogStopped())
         return;
-    if (msg.empty())
-    {
-        flushSyncLog();
-        return;
-    }
     std::string line;
     line.reserve(kLogPrefixSize + 128);
     line.resize(kLogPrefixSize);
@@ -803,11 +797,11 @@ void logdetail::submitLlog(const unsigned char* record, size_t size)
 
 void logdetail::llogText(std::string_view text)
 {
-    if (!text.empty())
-    {
-        llogFields(kTextSite, text);
-        return;
-    }
+    llogFields(kTextSite, text);
+}
+
+void logdetail::llogFlush()
+{
     if (syncLinesDropped())
         return;
     writeSyncRepeats(false);

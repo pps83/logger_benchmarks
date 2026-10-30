@@ -2,7 +2,6 @@
 #include "AsyncLog.h"
 #include "SyncLog.h"
 #include "sysutil.h"
-#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <atomic>
@@ -245,8 +244,5 @@ void logdetail::logFormatted(std::string_view format, std::format_args args)
 
 void LOG(std::string_view text)
 {
-    if (text.empty())
-        flushAsyncLog();
-    else
-        logdetail::submitText(text);
+    logdetail::submitText(text);
 }

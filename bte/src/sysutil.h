@@ -14,8 +14,8 @@ extern "C" __declspec(dllimport) int           QueryPerformanceCounter(union _LA
 
 long long timeTicksRaw(); // not relative to UTC epoch
 
-// time, timeSec, timeMs, timeMicro, timeTicks return monotonic steady time from 1970 aligned with wall clock. Alignment
-// is calculated once at process start. If wall clock is shifted while process runs, then these will not match wall clock.
+// time, timeSec, timeMs, timeMicro, timeTicks return monotonic steady time from 1970 aligned with wall clock once at
+// process start. If wall clock is shifted while process runs, then these will not match wall clock.
 long long timeTicks();
 long long timeMicro();
 long long timeMs();
@@ -30,7 +30,8 @@ long long timeNanoStop();
 struct picosec { long long sec, ps; };
 
 picosec ticksToPico(long long ticks);
-picosec ticksToPicoScaled(long long ticks, unsigned scale); // equivalent to ticksToPico(ticks / scale) without losing precision
+// equivalent to ticksToPico(ticks / scale) without losing precision
+picosec ticksToPicoScaled(long long ticks, unsigned scale);
 picosec nanoToPicoScaled(long long ticks, unsigned scale);
 long long ticksToNano(long long ticks);
 long long ticksToMicro(long long ticks);
@@ -38,8 +39,9 @@ long long ticksToMs(long long ticks);
 long long ticksToSec(long long ticks);
 double ticksToTime(long long ticks); // seconds with fractional part
 
-std::string formatTicks(long long ticks); // format ticks as either ns, us, ms, or seconds depending on the range, suitable for logging/output
-std::string formatTicks(picosec time); // format time as either ns, us, ms, or seconds depending on the range, suitable for logging/output
+// format ticks or time as either ns, us, ms, or seconds depending on the range, suitable for logging/output
+std::string formatTicks(long long ticks);
+std::string formatTicks(picosec time);
 
 int64_t getStartTimeTicks(); // get value of timeTicks() at process start
 double getStartTime(); // get value of time() at process start, equivalent to ticksToTime(getStartTimeTicks())
@@ -49,8 +51,8 @@ namespace tsc
 long long timeTicksRaw(); // not relative to UTC epoch
 long long rawToTicks(long long raw); // timeTicksRaw() value to timeTicks()
 
-// time, timeSec, timeMs, timeMicro, timeTicks return monotonic steady time from 1970 aligned with wall clock. Alignment
-// is calculated once at process start. If wall clock is shifted while process runs, then these will not match wall clock.
+// time, timeSec, timeMs, timeMicro, timeTicks return monotonic steady time from 1970 aligned with wall clock once at
+// process start. If wall clock is shifted while process runs, then these will not match wall clock.
 long long timeTicks();
 long long timeMicro();
 long long timeMs();
