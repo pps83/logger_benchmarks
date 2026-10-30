@@ -47,12 +47,15 @@ add_library(log_call_sites OBJECT src/test/LogCallSites.cpp)
 target_link_libraries(log_call_sites PRIVATE btelog)
 target_sources(bte_log_tests PRIVATE $<TARGET_OBJECTS:log_call_sites>)
 if (NOT CMAKE_BUILD_TYPE STREQUAL "Debug" AND NOT CMAKE_CXX_FLAGS MATCHES "sanitize")
+    # Without the compiler's stack checks, every call a LOG site makes is LOG's own
     if (MSVC)
+        target_compile_options(log_call_sites PRIVATE /GS-)
         # Visual Studio's LLVM tools, beside clang-cl or under VC/Tools for cl
         get_filename_component(COMPILER_DIR "${CMAKE_CXX_COMPILER}" DIRECTORY)
         find_program(LOG_DISASSEMBLER llvm-objdump HINTS "${COMPILER_DIR}"
                      "${COMPILER_DIR}/../../../../../Llvm/x64/bin" "${COMPILER_DIR}/../../../../../Llvm/ARM64/bin")
     else()
+        target_compile_options(log_call_sites PRIVATE -fno-stack-protector)
         set(LOG_DISASSEMBLER "${CMAKE_OBJDUMP}")
     endif()
     if (LOG_DISASSEMBLER)
