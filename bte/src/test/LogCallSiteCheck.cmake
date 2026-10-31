@@ -34,9 +34,8 @@ endforeach()
 objdumpLines(lines -d -r --no-show-raw-insn)
 
 set(allowed "logSlow|commitAfterRepeats")
-# The stack checks of MSVC's /GS and of a distribution's default stack protector, and the format argument index ARM64
-# MSVC does not inline
-set(oneCallAllowed "__security_(push|pop|check)_cookie|__stack_chk_fail|_Format_arg_index@std@@")
+# The format argument index ARM64 MSVC does not inline
+set(oneCallAllowed "_Format_arg_index@std@@")
 if (EXTRA_ALLOWED)
   string(APPEND allowed "|${EXTRA_ALLOWED}")
   string(APPEND oneCallAllowed "|${EXTRA_ALLOWED}")
